@@ -105,6 +105,23 @@ The app talks to the same backend MakerWorld's web UI uses:
 
 > Not affiliated with Bambu Lab / MakerWorld. For personal use with your own account, subject to their ToS.
 
+## CI: prebuilt container image
+
+A GitHub Actions workflow (`.github/workflows/container-image.yml`) builds the image on every push and publishes it to **GitHub Container Registry** — no secrets to configure, it uses the built-in `GITHUB_TOKEN`:
+
+- Push to `main` → `ghcr.io/<owner>/<repo>:latest` (+ `:main`, `:sha`)
+- Tag `v1.2.3` → `:1.2.3` (+ `:1.2`)
+- Pull requests → build-only (validates the Dockerfile, no push)
+- Multi-arch: `linux/amd64` and `linux/arm64` (works on a Pi/NAS)
+
+Pull the prebuilt image instead of building locally:
+
+```bash
+podman pull ghcr.io/<owner>/bambu_downloader:latest
+```
+
+The package inherits the repo's visibility: **public repo → public image** (anyone can pull, no login). **Private repo → private image** — pull with `podman login ghcr.io` using a PAT with `read:packages`. If the first workflow run on a private repo fails to push the package, check that "Workflow permissions" in repo Settings → Actions is set to "Read and write permissions", or re-run the workflow after the package is created.
+
 ## Development
 
 ```bash
