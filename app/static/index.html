@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#00ae42">
+<title>Bambu Downloader</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/static/icons/icon-192.png">
+<style>
+  :root {
+    --bg: #0f1214; --panel: #181d21; --panel2: #1f2529; --border: #2a3238;
+    --text: #e8ecea; --muted: #9aa5a1; --green: #00ae42; --green-dim: #008031;
+    --red: #e05252; --yellow: #d9a938; --radius: 12px;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); }
+  a { color: var(--green); }
+  header { position: sticky; top: 0; z-index: 10; background: rgba(15,18,20,.92); backdrop-filter: blur(8px); border-bottom: 1px solid var(--border); padding: 0.75rem 1rem; display: flex; align-items: center; gap: 0.75rem; }
+  header h1 { font-size: 1.1rem; margin: 0; display: flex; align-items: center; gap: 0.5rem; }
+  header .logo { width: 26px; height: 26px; border-radius: 7px; background: var(--green); display: inline-flex; align-items: center; justify-content: center; font-weight: 800; color: #04130a; font-size: 14px; }
+  header .spacer { flex: 1; }
+  .auth-badge { font-size: 0.78rem; padding: 0.25rem 0.6rem; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); cursor: pointer; background: none; }
+  .auth-badge.on { color: var(--green); border-color: var(--green-dim); }
+  .auth-badge.off { color: var(--yellow); border-color: var(--yellow); }
+  main { max-width: 980px; margin: 0 auto; padding: 1rem; }
+  nav.tabs { display: flex; gap: 0.25rem; margin-bottom: 1.25rem; background: var(--panel); border: 1px solid var(--border); padding: 0.3rem; border-radius: var(--radius); }
+  nav.tabs button { flex: 1; padding: 0.55rem 0.5rem; border: none; border-radius: 8px; background: none; color: var(--muted); font-size: 0.9rem; cursor: pointer; }
+  nav.tabs button.active { background: var(--panel2); color: var(--text); box-shadow: inset 0 0 0 1px var(--border); }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem; margin-bottom: 1rem; }
+  .card h2 { margin: 0 0 0.75rem; font-size: 1rem; display: flex; align-items: center; gap: 0.5rem; }
+  .row { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
+  input[type=text], input[type=email], input[type=password], input[type=number], select {
+    flex: 1; min-width: 200px; padding: 0.6rem 0.75rem; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--bg); color: var(--text); font-size: 0.92rem;
+  }
+  input:focus, select:focus { outline: 2px solid var(--green-dim); border-color: transparent; }
+  button.primary { padding: 0.6rem 1.1rem; border-radius: 8px; border: none; background: var(--green); color: #04130a; font-weight: 600; cursor: pointer; font-size: 0.92rem; }
+  button.primary:disabled { opacity: .5; cursor: wait; }
+  button.ghost { padding: 0.45rem 0.8rem; border-radius: 8px; border: 1px solid var(--border); background: none; color: var(--text); cursor: pointer; font-size: 0.85rem; }
+  button.ghost:hover { border-color: var(--green-dim); }
+  button.danger { padding: 0.45rem 0.8rem; border-radius: 8px; border: 1px solid #5c2626; background: none; color: var(--red); cursor: pointer; font-size: 0.85rem; }
+  .muted { color: var(--muted); font-size: 0.85rem; }
+  .hint { color: var(--muted); font-size: 0.8rem; margin: 0.4rem 0 0; }
+  .toast-wrap { position: fixed; bottom: 1rem; left: 50%; transform: translateX(-50%); z-index: 100; display: flex; flex-direction: column; gap: 0.5rem; width: min(92vw, 480px); }
+  .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 90; display: flex; align-items: center; justify-content: center; padding: 1rem; }
+  .modal-overlay[hidden] { display: none; }
+  .modal { max-width: 480px; margin: 0; }
+  .toast { background: var(--panel2); border: 1px solid var(--border); border-radius: 10px; padding: 0.7rem 1rem; font-size: 0.88rem; box-shadow: 0 8px 30px rgba(0,0,0,.4); animation: slidein .18s ease-out; }
+  .toast.err { border-color: #5c2626; color: #ffb3b3; }
+  .toast.ok { border-color: var(--green-dim); }
+  @keyframes slidein { from { opacity: 0; transform: translateY(8px);} to { opacity: 1; transform: none; } }
+  .model-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 0.75rem; }
+  .chip-bar { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.9rem; }
+  .chip { font-size: 0.78rem; padding: 0.28rem 0.7rem; border-radius: 999px; border: 1px solid var(--border); background: none; color: var(--muted); cursor: pointer; }
+  .chip:hover { border-color: var(--green-dim); color: var(--text); }
+  .chip.active { background: var(--green); color: #04130a; border-color: var(--green); font-weight: 600; }
+  .chip .n { opacity: 0.75; margin-left: 0.25rem; font-size: 0.72rem; }
+  .model-card { background: var(--panel2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; display: flex; flex-direction: column; }
+  .model-card .cover { display: block; width: 100%; aspect-ratio: 4/3; background: var(--bg); position: relative; }
+  .model-card .cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .cover-fallback { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 2rem; opacity: 0.4; }
+  .model-card .cover::after { content: '↗'; position: absolute; top: 0.4rem; right: 0.5rem; font-size: 0.75rem; color: #fff; opacity: 0; transition: opacity .15s; text-shadow: 0 1px 3px rgba(0,0,0,.8); }
+  .model-card .cover:hover::after { opacity: 1; }
+  .model-card .meta { padding: 0.6rem 0.7rem; }
+  .model-card .title { font-size: 0.85rem; font-weight: 600; line-height: 1.25; margin-bottom: 0.25rem; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .model-card .sub { font-size: 0.72rem; color: var(--muted); }
+  .model-card .actions { padding-top: 0.4rem; }
+  .mw-link { font-size: 0.75rem; color: var(--green); text-decoration: none; }
+  .mw-link:hover { text-decoration: underline; }
+  .coll-item { display: flex; align-items: center; gap: 0.75rem; padding: 0.7rem 0.25rem; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .coll-item:last-child { border-bottom: none; }
+  .coll-item .title { font-weight: 600; flex: 1; min-width: 160px; }
+  .coll-item .interval { display: flex; align-items: center; gap: 0.4rem; }
+  .coll-item input[type=number] { width: 90px; min-width: 90px; }
+  .event { padding: 0.45rem 0; border-bottom: 1px solid var(--border); font-size: 0.85rem; }
+  .event:last-child { border-bottom: none; }
+  .event time { color: var(--muted); margin-right: 0.5rem; font-variant-numeric: tabular-nums; font-size: 0.75rem; }
+  .event.error { color: #ffb3b3; }
+  .tag { display: inline-block; font-size: 0.7rem; padding: 0.1rem 0.5rem; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+  .tag.ok { color: var(--green); border-color: var(--green-dim); }
+  .tag.warn { color: var(--yellow); border-color: var(--yellow); }
+  .tag.origin { background: var(--panel2); color: var(--text); font-size: 0.68rem; }
+  .login-steps { display: flex; gap: 0.4rem; margin-bottom: 0.8rem; }
+  .login-steps .step { width: 28px; height: 28px; border-radius: 50%; background: var(--panel2); border: 1px solid var(--border); display: inline-flex; align-items: center; justify-content: center; font-size: 0.8rem; color: var(--muted); }
+  .login-steps .step.on { background: var(--green); color: #04130a; border-color: var(--green); font-weight: 700; }
+  .empty { text-align: center; color: var(--muted); padding: 2rem 0; }
+  @media (max-width: 600px) { main { padding: 0.6rem; } nav.tabs button { font-size: 0.8rem; } }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="logo">B</span> Bambu Downloader</h1>
+  <span class="spacer"></span>
+  <button class="auth-badge off" id="authBadge" onclick="showTab('settings')">Not signed in</button>
+</header>
+<main>
+  <nav class="tabs">
+    <button data-tab="download" class="active" onclick="showTab('download')">⬇ Download</button>
+    <button data-tab="library" onclick="showTab('library')">📚 Library</button>
+    <button data-tab="collections" onclick="showTab('collections')">🗂 Collections</button>
+    <button data-tab="activity" onclick="showTab('activity')">⚡ Activity</button>
+    <button data-tab="settings" onclick="showTab('settings')">⚙ Settings</button>
+  </nav>
+
+  <!-- Download tab -->
+  <section id="tab-download" class="tab">
+    <div class="card">
+      <h2>⬇ Download a model</h2>
+      <div class="row">
+        <input type="text" id="modelUrl" placeholder="https://makerworld.com/en/models/1234567-model-name" onkeydown="if(event.key==='Enter')doDownload()">
+        <button class="primary" id="dlBtn" onclick="doDownload()">Download</button>
+      </div>
+      <p class="hint">Paste any MakerWorld model URL. Optionally include <code>#profileId-1234</code> to pick a specific plate.</p>
+      <div id="dlResult"></div>
+    </div>
+  </section>
+
+  <!-- Library tab -->
+  <section id="tab-library" class="tab" hidden>
+    <div class="card">
+      <h2>📚 Downloaded models <span class="tag" id="libCount"></span></h2>
+      <div class="chip-bar" id="labelChips"></div>
+      <div class="model-grid" id="modelGrid"></div>
+      <div class="empty" id="libEmpty">Nothing downloaded yet.</div>
+    </div>
+  </section>
+
+  <!-- Collections tab -->
+  <section id="tab-collections" class="tab" hidden>
+    <div class="card">
+      <h2>🗂 Follow a collection</h2>
+      <div class="row">
+        <input type="text" id="collUrl" placeholder="https://makerworld.com/en/collections/12345-collection-name" onkeydown="if(event.key==='Enter')addCollection()">
+        <select id="collInterval">
+          <option value="60">Every hour</option>
+          <option value="360" selected>Every 6 hours</option>
+          <option value="720">Every 12 hours</option>
+          <option value="1440">Every day</option>
+          <option value="10080">Every week</option>
+        </select>
+        <button class="primary" onclick="addCollection()">Add</button>
+      </div>
+      <p class="hint">New models in the collection will be downloaded automatically on each sync. Existing downloads are never duplicated.</p>
+    </div>
+    <div class="card">
+      <h2>Followed collections</h2>
+      <div id="collList"></div>
+      <div class="empty" id="collEmpty">No collections followed yet.</div>
+    </div>
+  </section>
+
+  <!-- Activity tab -->
+  <section id="tab-activity" class="tab" hidden>
+    <div class="card">
+      <h2>⚡ Recent activity</h2>
+      <div id="eventList"></div>
+      <div class="empty" id="evEmpty">No activity yet.</div>
+    </div>
+  </section>
+
+  <!-- Settings tab -->
+  <section id="tab-settings" class="tab" hidden>
+    <div class="card" id="loginCard">
+      <h2>🔐 MakerWorld sign-in</h2>
+      <div class="login-steps"><span class="step on" id="stepBadge1">1</span><span class="step" id="stepBadge2">2</span></div>
+      <div id="loginStep1">
+        <div class="row" style="margin-bottom:0.5rem">
+          <input type="email" id="loginEmail" placeholder="Email">
+        </div>
+        <div class="row" style="margin-bottom:0.5rem">
+          <input type="password" id="loginPassword" placeholder="Password" onkeydown="if(event.key==='Enter')doLogin()">
+        </div>
+        <div class="row" style="margin-bottom:0.5rem">
+          <select id="loginRegion" style="max-width:160px">
+            <option value="global">Global</option>
+            <option value="china">China</option>
+          </select>
+          <button class="primary" id="loginBtn" onclick="doLogin()">Sign in</button>
+        </div>
+        <p class="muted" style="margin:0.6rem 0 0.3rem">or paste an access token from a browser session:</p>
+        <div class="row">
+          <input type="text" id="tokenInput" placeholder="access_token (from makerworld.com cookies)">
+          <button class="ghost" onclick="doTokenLogin()">Use token</button>
+        </div>
+      </div>
+      <div id="loginStep2" hidden>
+        <p class="muted" id="step2Hint"></p>
+        <div class="row">
+          <input type="text" id="otpCode" placeholder="6-digit code" inputmode="numeric" style="max-width:180px" onkeydown="if(event.key==='Enter')doVerify()">
+          <button class="primary" onclick="doVerify()">Verify</button>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>ℹ About</h2>
+      <p class="muted" id="sysInfo"></p>
+      <button class="ghost" onclick="loadAll()">Refresh status</button>
+    </div>
+    <div class="card">
+      <h2>🔑 API key</h2>
+      <p class="muted">Only needed when the server runs with <code>BND_API_KEY</code> set.</p>
+      <div class="row">
+        <input type="password" id="apiKeyInput" placeholder="X-API-Key value">
+        <button class="ghost" onclick="saveApiKey()">Save</button>
+        <button class="ghost" onclick="clearApiKey()">Clear</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div class="toast-wrap" id="toasts"></div>
+
+<!-- Unfollow confirmation dialog (three-way: keep files / delete files / cancel) -->
+<div class="modal-overlay" id="removeModal" hidden onclick="if(event.target===this)closeRemoveModal()">
+  <div class="card modal">
+    <h2>🗂 Unfollow collection</h2>
+    <p class="muted" id="removeModalText"></p>
+    <div class="row" style="justify-content:flex-end; margin-top:1rem">
+      <button class="ghost" onclick="closeRemoveModal()">Cancel</button>
+      <button class="ghost" onclick="doRemoveColl(false)">Unfollow (keep files)</button>
+      <button class="danger" onclick="doRemoveColl(true)">Unfollow + delete files</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+<script>
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  }
+</script>
+</body>
+</html>

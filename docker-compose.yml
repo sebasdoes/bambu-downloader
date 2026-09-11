@@ -1,0 +1,27 @@
+services:
+  bambu-downloader:
+    build: .
+    image: bambu-downloader:latest
+    container_name: bambu-downloader
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    # keep-id: your host uid appears inside the container, so the bind-mounted
+    # downloads/ and data/ are writable under rootless podman. Without it you
+    # get "attempt to write a readonly database". (Docker users: remove this
+    # line — 'keep-id' is podman-specific.)
+    userns_mode: keep-id
+    volumes:
+      # Models land here on the host — point at your printer's sync folder if you like
+      - ./downloads:/app/downloads:Z
+      # SQLite database + stored Bambu Cloud token
+      - ./data:/app/data:Z
+    environment:
+      - BND_PORT=8080
+      # Uncomment to require an X-API-Key header on every /api/* request
+      # (recommended on shared networks — set it in the app's Settings tab too):
+      # - BND_API_KEY=change-me
+      # Seconds between downloads inside a collection sync (anti rate-limit):
+      # - BND_DOWNLOAD_DELAY_SECONDS=3
+      # How often the scheduler checks for due collections:
+      # - BND_SCHEDULER_INTERVAL_SECONDS=300
