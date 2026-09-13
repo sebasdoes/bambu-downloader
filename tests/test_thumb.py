@@ -165,4 +165,4 @@ def test_sw_cache_version_bumped(thumb_env):
     """The SW shell list must reference the current version constant."""
     client, _, _ = thumb_env
     sw = client.get("/sw.js").text
-    assert "CACHE_VERSION = 'v9'" in sw
+    assert "CACHE_VERSION = 'v10'" in sw

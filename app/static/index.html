@@ -115,15 +115,15 @@
   <h1><span class="logo">B</span> Bambu Downloader</h1>
   <span class="tag ok" id="dlQueueBadge" hidden></span>
   <span class="spacer"></span>
-  <button class="auth-badge off" id="authBadge" onclick="showTab('settings')">Not signed in</button>
+  <button class="auth-badge off" id="authBadge" data-action="tab" data-tab="settings">Not signed in</button>
 </header>
 <main>
   <nav class="tabs">
-    <button data-tab="download" class="active" onclick="showTab('download')">⬇ Download</button>
-    <button data-tab="library" onclick="showTab('library')">📚 Library</button>
-    <button data-tab="collections" onclick="showTab('collections')">🗂 Collections</button>
-    <button data-tab="activity" onclick="showTab('activity')">⚡ Activity</button>
-    <button data-tab="settings" onclick="showTab('settings')">⚙ Settings</button>
+    <button data-tab="download" class="active" data-action="tab">⬇ Download</button>
+    <button data-tab="library" data-action="tab">📚 Library</button>
+    <button data-tab="collections" data-action="tab">🗂 Collections</button>
+    <button data-tab="activity" data-action="tab">⚡ Activity</button>
+    <button data-tab="settings" data-action="tab">⚙ Settings</button>
   </nav>
 
   <!-- Download tab -->
@@ -131,8 +131,8 @@
     <div class="card">
       <h2>⬇ Download a model</h2>
       <div class="row">
-        <input type="text" id="modelUrl" placeholder="https://makerworld.com/en/models/1234567-model-name" onkeydown="if(event.key==='Enter')doDownload()">
-        <button class="primary" id="dlBtn" onclick="doDownload()">Download</button>
+        <input type="text" id="modelUrl" placeholder="https://makerworld.com/en/models/1234567-model-name">
+        <button class="primary" id="dlBtn" data-action="download">Download</button>
       </div>
       <p class="hint">Paste any MakerWorld model URL. Optionally include <code>#profileId-1234</code> to pick a specific plate.</p>
       <div id="dlResult"></div>
@@ -144,13 +144,13 @@
     <div class="card">
       <h2>📚 Downloaded models <span class="tag" id="libCount"></span></h2>
       <div class="row" style="margin-bottom:0.6rem">
-        <input type="text" id="libSearch" placeholder="Search title, creator, filename…" oninput="applyLibSearch()">
-        <button class="ghost" onclick="document.getElementById('libSearch').value='';applyLibSearch()">Clear</button>
+        <input type="text" id="libSearch" placeholder="Search title, creator, filename…">
+        <button class="ghost" data-action="lib-clear">Clear</button>
       </div>
       <div class="chip-bar" id="labelChips"></div>
       <div class="model-grid" id="modelGrid"></div>
       <div style="text-align:center; margin-top:0.9rem">
-        <button class="ghost" id="libMore" hidden onclick="loadMoreModels()">Load more</button>
+        <button class="ghost" id="libMore" hidden data-action="load-more">Load more</button>
       </div>
       <div class="empty" id="libEmpty">Nothing downloaded yet.</div>
     </div>
@@ -161,7 +161,7 @@
     <div class="card">
       <h2>🗂 Follow a collection</h2>
       <div class="row">
-        <input type="text" id="collUrl" placeholder="https://makerworld.com/en/collections/12345-collection-name" onkeydown="if(event.key==='Enter')addCollection()">
+        <input type="text" id="collUrl" placeholder="https://makerworld.com/en/collections/12345-collection-name">
         <select id="collInterval">
           <option value="60">Every hour</option>
           <option value="360" selected>Every 6 hours</option>
@@ -169,14 +169,14 @@
           <option value="1440">Every day</option>
           <option value="10080">Every week</option>
         </select>
-        <button class="primary" onclick="addCollection()">Add</button>
+        <button class="primary" data-action="add-collection">Add</button>
       </div>
       <p class="hint">New models in the collection will be downloaded automatically on each sync. Existing downloads are never duplicated.</p>
     </div>
     <div class="card">
       <h2>Your MakerWorld collections <span class="tag" id="mineMeta"></span>
         <span class="spacer" style="flex:1"></span>
-        <button class="ghost" onclick="refreshMyCollections()">Refresh</button>
+        <button class="ghost" data-action="refresh-mine">Refresh</button>
       </h2>
       <p class="hint" id="mineHint">All collections from your signed-in account, with ✓ per model already in your library. Refreshes automatically every hour.</p>
       <div id="mineList"></div>
@@ -208,41 +208,41 @@
           <input type="email" id="loginEmail" placeholder="Email">
         </div>
         <div class="row" style="margin-bottom:0.5rem">
-          <input type="password" id="loginPassword" placeholder="Password" onkeydown="if(event.key==='Enter')doLogin()">
+          <input type="password" id="loginPassword" placeholder="Password">
         </div>
         <div class="row" style="margin-bottom:0.5rem">
           <select id="loginRegion" style="max-width:160px">
             <option value="global">Global</option>
             <option value="china">China</option>
           </select>
-          <button class="primary" id="loginBtn" onclick="doLogin()">Sign in</button>
+          <button class="primary" id="loginBtn" data-action="login">Sign in</button>
         </div>
         <p class="muted" style="margin:0.6rem 0 0.3rem">or paste an access token from a browser session:</p>
         <div class="row">
           <input type="text" id="tokenInput" placeholder="access_token (from makerworld.com cookies)">
-          <button class="ghost" onclick="doTokenLogin()">Use token</button>
+          <button class="ghost" data-action="token-login">Use token</button>
         </div>
       </div>
       <div id="loginStep2" hidden>
         <p class="muted" id="step2Hint"></p>
         <div class="row">
-          <input type="text" id="otpCode" placeholder="6-digit code" inputmode="numeric" style="max-width:180px" onkeydown="if(event.key==='Enter')doVerify()">
-          <button class="primary" onclick="doVerify()">Verify</button>
+          <input type="text" id="otpCode" placeholder="6-digit code" inputmode="numeric" style="max-width:180px">
+          <button class="primary" data-action="verify">Verify</button>
         </div>
       </div>
     </div>
     <div class="card">
       <h2>ℹ About</h2>
       <p class="muted" id="sysInfo"></p>
-      <button class="ghost" onclick="loadAll()">Refresh status</button>
+      <button class="ghost" data-action="refresh-status">Refresh status</button>
     </div>
     <div class="card">
       <h2>🔑 API key</h2>
       <p class="muted">Only needed when the server runs with <code>BND_API_KEY</code> set.</p>
       <div class="row">
         <input type="password" id="apiKeyInput" placeholder="X-API-Key value">
-        <button class="ghost" onclick="saveApiKey()">Save</button>
-        <button class="ghost" onclick="clearApiKey()">Clear</button>
+        <button class="ghost" data-action="api-save">Save</button>
+        <button class="ghost" data-action="api-clear">Clear</button>
       </div>
     </div>
   </section>
@@ -251,23 +251,18 @@
 <div class="toast-wrap" id="toasts"></div>
 
 <!-- Unfollow confirmation dialog (three-way: keep files / delete files / cancel) -->
-<div class="modal-overlay" id="removeModal" hidden onclick="if(event.target===this)closeRemoveModal()">
+<div class="modal-overlay" id="removeModal" hidden>
   <div class="card modal">
     <h2>🗂 Unfollow collection</h2>
     <p class="muted" id="removeModalText"></p>
     <div class="row" style="justify-content:flex-end; margin-top:1rem">
-      <button class="ghost" onclick="closeRemoveModal()">Cancel</button>
-      <button class="ghost" onclick="doRemoveColl(false)">Unfollow (keep files)</button>
-      <button class="danger" onclick="doRemoveColl(true)">Unfollow + delete files</button>
+      <button class="ghost" data-action="modal-cancel">Cancel</button>
+      <button class="ghost" data-action="modal-remove-keep">Unfollow (keep files)</button>
+      <button class="danger" data-action="modal-remove-delete">Unfollow + delete files</button>
     </div>
   </div>
 </div>
 
 <script src="/static/app.js"></script>
-<script>
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/sw.js').catch(() => {});
-  }
-</script>
 </body>
 </html>

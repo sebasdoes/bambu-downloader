@@ -6,6 +6,90 @@ let loginEmail = '';
 let loginRegion = 'global';
 let eventTimer = null;
 
+// ------------------------------------------------------------ CSP-safe events
+// The server sends a strict CSP (script-src 'self'; no 'unsafe-inline'), so
+// inline onclick/onkeydown/oninput/onchange attributes NEVER run — buttons
+// render but do nothing (that's the "can't click anything" bug). All wiring
+// lives here instead: addEventListener for static markup, event delegation
+// (data-action attributes) for dynamically rendered lists.
+function wireEvents() {
+  // Enter-to-submit for single-input forms.
+  for (const [inputId, action] of [
+    ['modelUrl', 'download'], ['collUrl', 'add-collection'],
+    ['loginPassword', 'login'], ['otpCode', 'verify'],
+  ]) {
+    const input = document.getElementById(inputId);
+    if (input) input.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') handleAction(action, ev.target);
+    });
+  }
+  // Library search box: filter on every keystroke; Clear button resets it.
+  const libSearch = document.getElementById('libSearch');
+  if (libSearch) libSearch.addEventListener('input', applyLibSearch);
+  // Static buttons.
+  for (const el of document.querySelectorAll('[data-action]')) {
+    el.addEventListener('click', (ev) => handleAction(el.dataset.action, ev.target));
+  }
+  // Delegated clicks for lists rendered as innerHTML (survive re-renders).
+  for (const [containerId, names] of [
+    ['labelChips', ['set-lib-filter']],
+    ['mineList', ['follow-mine']],
+    ['collList', ['sync-now', 'coll-toggle', 'coll-remove']],
+  ]) {
+    const host = document.getElementById(containerId);
+    if (host) host.addEventListener('click', (ev) => {
+      const el = ev.target.closest('[data-action]');
+      if (el && host.contains(el) && names.includes(el.dataset.action)) {
+        handleAction(el.dataset.action, el);
+      }
+    });
+  }
+  // Collection rows: interval/plates selects + overlay backdrop close.
+  const collList = document.getElementById('collList');
+  if (collList) {
+    collList.addEventListener('change', (ev) => {
+      const row = ev.target.closest('.coll-item');
+      if (!row) return;
+      const cid = row.dataset.id;
+      if (ev.target.matches('.interval input')) setInterval_(cid, ev.target.value);
+      if (ev.target.matches('.interval select')) setPlatesMode(cid, ev.target.value);
+    });
+  }
+  const removeModal = document.getElementById('removeModal');
+  if (removeModal) removeModal.addEventListener('click', (ev) => {
+    if (ev.target === ev.currentTarget) closeRemoveModal();  // backdrop click
+  });
+}
+
+// Dispatch a data-action click to its handler. Used for both static buttons
+// and delegated list rows; ev is only needed for focus restoration.
+function handleAction(action, el) {
+  const actions = {
+    'tab': () => showTab(el.dataset.tab),
+    'download': () => doDownload(),
+    'lib-clear': () => { document.getElementById('libSearch').value = ''; applyLibSearch(); },
+    'load-more': () => loadMoreModels(),
+    'set-lib-filter': () => setLibFilter(el.dataset.label),
+    'add-collection': () => addCollection(),
+    'refresh-mine': () => refreshMyCollections(),
+    'follow-mine': () => followMine(el.dataset.cid, el.dataset.slug),
+    'sync-now': () => syncNow(el.dataset.cid),
+    'coll-toggle': () => toggleColl(el.dataset.cid, el.dataset.enable === 'true'),
+    'coll-remove': () => removeColl(el.dataset.cid),
+    'modal-cancel': () => closeRemoveModal(),
+    'modal-remove-keep': () => doRemoveColl(false),
+    'modal-remove-delete': () => doRemoveColl(true),
+    'login': () => doLogin(),
+    'verify': () => doVerify(),
+    'token-login': () => doTokenLogin(),
+    'refresh-status': () => loadAll(),
+    'api-save': () => saveApiKey(),
+    'api-clear': () => clearApiKey(),
+  };
+  const fn = actions[action];
+  if (fn) fn();
+}
+
 // ---------------------------------------------------------------- helpers
 // API key (only needed when the server sets BND_API_KEY). Stored locally.
 function getApiKey() { return localStorage.getItem('bnd_api_key') || ''; }
@@ -17,7 +101,7 @@ async function api(path, opts = {}) {
   if (key) headers['X-API-Key'] = key;
   const res = await fetch(path, { ...opts, headers, body: opts.body ? JSON.stringify(opts.body) : undefined });
   let data = null;
-  try { data = await res.json(); } catch { /* no body */ }
+  try { data = await res.json(); } catch (e) { /* no body */ }
   if (res.status === 401 && !key && !path.includes('/api/auth')) {
     // Server requires an API key we don't have — ask once, then retry.
     const k = prompt('This server requires an API key (BND_API_KEY). Enter it:');
@@ -39,7 +123,7 @@ function toast(msg, kind = '') {
 }
 
 function esc(s) {
-  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
 function fmtTime(ts) {
@@ -88,12 +172,12 @@ async function loadStatus() {
     // Download queue: queued/active items (Semaphore(2) can hold 2 active
     // plus any number queued behind it during a sync).
     const q = s.downloads || [];
-    const badge = document.getElementById('dlQueueBadge');
-    if (badge) {
+    const queueBadge = document.getElementById('dlQueueBadge');
+    if (queueBadge) {
       const active = q.filter(d => d.state === 'active').length;
       const queued = q.length - active;
-      badge.hidden = q.length === 0;
-      badge.textContent = q.length
+      queueBadge.hidden = q.length === 0;
+      queueBadge.textContent = q.length
         ? `⬇ ${active ? active + ' active' : ''}${active && queued ? ' · ' : ''}${queued ? queued + ' queued' : ''}`
         : '';
     }
@@ -144,7 +228,7 @@ async function loadLabels() {
     const chips = [{ label: 'All', count: total, active: libFilter.label === null }]
       .concat(labels.map(l => ({ ...l, active: libFilter.label === l.label })));
     bar.innerHTML = chips.map(c =>
-      `<button class="chip ${c.active ? 'active' : ''}" data-label="${esc(c.label)}" onclick="setLibFilter('${esc(c.label).replace(/'/g, "&#39;")}')">${esc(c.label)}<span class="n">${c.count}</span></button>`
+      `<button class="chip ${c.active ? 'active' : ''}" data-action="set-lib-filter" data-label="${esc(c.label)}">${esc(c.label)}<span class="n">${c.count}</span></button>`
     ).join('');
   } catch (e) { console.error(e); }
 }
@@ -159,7 +243,7 @@ function setLibFilter(label) {
 function modelCard(m) {
   const mwUrl = `https://makerworld.com/en/models/${m.design_id}${m.slug ? '-' + m.slug : ''}`;
   const img = m.cover_url
-    ? `<img loading="lazy" src="/thumb?url=${encodeURIComponent(m.cover_url)}" alt="" onerror="this.remove()">`
+    ? `<img loading="lazy" src="/thumb?url=${encodeURIComponent(m.cover_url)}" alt="" class="cover-img">`
     : `<div class="cover-fallback">🖨</div>`;
   const origin = m.collection_title
     ? `<span class="tag origin" title="${esc(m.collection_title)}">🗂 ${esc(m.collection_title)}</span>`
@@ -307,7 +391,7 @@ async function loadMyCollections() {
             : `<span class="mine-none">${c.design_count} models · none downloaded</span>`);
       const follow = c.followed
         ? `<span class="tag ok">following</span>`
-        : `<button class="ghost" onclick="followMine(${c.collection_id}, '${esc(c.slug || String(c.collection_id))}')">Follow</button>`;
+        : `<button class="ghost" data-action="follow-mine" data-cid="${c.collection_id}" data-slug="${esc(c.slug || String(c.collection_id))}">Follow</button>`;
       const mw = `https://makerworld.com/en/collections/${c.collection_id}${c.slug ? '-' + c.slug : ''}`;
       return `
       <div class="mine-item">
@@ -363,19 +447,19 @@ async function loadCollections() {
         <span class="title">${esc(c.title || 'Collection ' + c.collection_id)}</span>
         <span class="tag ${c.enabled ? 'ok' : 'warn'}">${c.enabled ? 'active' : 'paused'}</span>
         <span class="muted">${c.last_sync_at ? 'last sync ' + new Date(c.last_sync_at).toLocaleString() : 'never synced'}</span>
-        <span class="muted">${c.last_sync_new ?? 0} new last time</span>
+        <span class="muted">${c.last_sync_new != null ? c.last_sync_new : 0} new last time</span>
         <span class="interval">
-          <input type="number" value="${c.sync_interval_minutes}" min="15" step="15" onchange="setInterval_(${c.collection_id}, this.value)"> min
+          <input type="number" value="${c.sync_interval_minutes}" min="15" step="15"> min
         </span>
         <span class="interval">
-          <select onchange="setPlatesMode(${c.collection_id}, this.value)" title="Which plates to download on sync">
+          <select title="Which plates to download on sync">
             <option value="default" ${c.plates_mode !== 'all' ? 'selected' : ''}>default plate</option>
             <option value="all" ${c.plates_mode === 'all' ? 'selected' : ''}>all plates</option>
           </select>
         </span>
-        <button class="ghost" onclick="syncNow(${c.collection_id})">Sync now</button>
-        <button class="ghost" onclick="toggleColl(${c.collection_id}, ${c.enabled ? 'false' : 'true'})">${c.enabled ? 'Pause' : 'Resume'}</button>
-        <button class="danger" onclick="removeColl(${c.collection_id})">Remove</button>
+        <button class="ghost" data-action="sync-now" data-cid="${c.collection_id}">Sync now</button>
+        <button class="ghost" data-action="coll-toggle" data-cid="${c.collection_id}" data-enable="${c.enabled ? 'false' : 'true'}">${c.enabled ? 'Pause' : 'Resume'}</button>
+        <button class="danger" data-action="coll-remove" data-cid="${c.collection_id}">Remove</button>
       </div>`).join('');
   } catch (e) {
     toast(e.message, 'err');
@@ -546,6 +630,15 @@ async function doTokenLogin() {
 }
 
 // ---------------------------------------------------------------- startup
+// Broken covers (404/502) should disappear instead of showing a broken-image
+// icon; the .cover-fallback underneath shows through. Listener is delegated on
+// the grid — CSP forbids inline onerror attributes.
+const modelGrid = document.getElementById('modelGrid');
+if (modelGrid) modelGrid.addEventListener('error', (ev) => {
+  const t = ev.target;
+  if (t && t.classList && t.classList.contains('cover-img')) t.remove();
+}, true);
+
 function saveApiKey() {
   setApiKey(document.getElementById('apiKeyInput').value.trim());
   toast('API key saved', 'ok');
@@ -560,8 +653,16 @@ function clearApiKey() {
 async function loadAll() {
   await loadStatus();
 }
+
+wireEvents();
 loadAll();
 setInterval(loadStatus, 30000);
+
+// PWA service worker registration (moved here from an inline script — CSP
+// blocks inline scripts, which is also why ALL handlers are wired via JS).
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+}
 
 // PWA share-target: ?url=... shared from Bambu Handy / Android
 const params = new URLSearchParams(location.search);
