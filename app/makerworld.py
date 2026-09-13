@@ -31,6 +31,8 @@ HTTP clients; the HTML pages are. api.bambulab.com is fully open.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import re
 import uuid
 from pathlib import Path
@@ -41,8 +43,15 @@ import httpx
 
 from .config import settings
 
+logger = logging.getLogger(__name__)
+
 # Bambu's 401 signature for an expired session.
 EXPIRED_401_CODES = {4}
+
+# Design-id top-up paging (list_my_collections completing big collections):
+# page size per request and a hard page-count guard against endless loops.
+CAP_PAGE_SIZE = 100
+CAP_MAX_PAGES = 10
 
 
 class MakerWorldError(Exception):
@@ -440,16 +449,25 @@ class MakerWorldClient:
             auth=True,
         )
 
-    async def list_my_collections(self, page_size: int = 50) -> list[dict[str, Any]]:
+    async def list_my_collections(
+        self,
+        page_size: int = 50,
+        max_designs_per_collection: int = 1000,
+    ) -> list[dict[str, Any]]:
         """All of the signed-in user's own collections, walking pagination.
 
         Returns a normalized list of
         {collection_id, title, slug, design_count, is_default, design_ids}.
-        design_ids comes from the embedded page-1 designs when present; if a
-        collection's designCnt exceeds that page, the remainder is NOT fetched
-        here (the UI's checkmarks are advisory, and syncs do their own full
-        listing). Anonymous tokens are rejected by the endpoint itself via
-        _mw_get's auth handling (AuthRequiredError).
+
+        The tab endpoint embeds only the FIRST page of each collection's
+        designs (~100 ids), so collections with designCnt beyond that get
+        their id list completed via the favorites/{cid}/designs pager —
+        otherwise the UI's "✓ all downloaded" could never trigger for big
+        collections (downloaded_count could never reach design_count).
+        Capped at max_designs_per_collection per collection so one
+        10,000-model collection can't turn into a crawl; a partial list
+        still shows correct n/m checkmarks for the ids we do have. A small
+        delay between paging requests keeps the anti-abuse layer (418) calm.
         """
         out: list[dict[str, Any]] = []
         offset = 0
@@ -464,12 +482,37 @@ class MakerWorldClient:
                     except (TypeError, ValueError):
                         continue
                 design_ids = [i for i in design_ids if i]
+
+                collection_id = int(hit.get("id") or 0)
+                design_count = int(hit.get("designCnt") or 0)
+                # Top up short lists from the collection's own pager (skip
+                # when the embedded page already covers everything, or when
+                # the cap can't change the outcome).
+                if (
+                    collection_id
+                    and design_count > len(design_ids)
+                    and len(design_ids) < max_designs_per_collection
+                ):
+                    try:
+                        extra = await self._collect_design_ids(
+                            collection_id,
+                            known=set(design_ids),
+                            cap=max_designs_per_collection,
+                        )
+                        design_ids.extend(extra)
+                    except MakerWorldError as e:
+                        # Keep the collection with partial ids rather than
+                        # failing the whole listing over one paging hiccup.
+                        logger.warning(
+                            "design list top-up for collection %s failed: %s",
+                            collection_id, e,
+                        )
                 out.append(
                     {
-                        "collection_id": int(hit.get("id") or 0),
+                        "collection_id": collection_id,
                         "title": str(hit.get("title") or ""),
                         "slug": str(hit.get("slug") or ""),
-                        "design_count": int(hit.get("designCnt") or 0),
+                        "design_count": design_count,
                         "is_default": bool(hit.get("isDefault")),
                         "design_ids": design_ids,
                     }
@@ -479,6 +522,42 @@ class MakerWorldClient:
             if not hits or offset >= total:
                 break
         return [c for c in out if c["collection_id"]]
+
+    async def _collect_design_ids(
+        self,
+        collection_id: int,
+        known: set[int],
+        cap: int,
+    ) -> list[int]:
+        """Page through favorites/{cid}/designs collecting NEW design ids.
+
+        Used to complete the embedded page-1 id list for larger collections.
+        Stops at `cap` ids total, when the server reports fewer total items,
+        on an empty page, or at the CAP_MAX_PAGES guard (belt against a
+        pathological endless pagination). Politeness delay between pages.
+        """
+        extra: list[int] = []
+        fetched = 0
+        for _ in range(CAP_MAX_PAGES):
+            if settings.download_delay_seconds > 0:
+                await asyncio.sleep(settings.download_delay_seconds)
+            page = await self.get_collection_designs_page(
+                collection_id, limit=CAP_PAGE_SIZE, offset=fetched
+            )
+            hits = page.get("hits") or []
+            if not hits:
+                break
+            for d in hits:
+                try:
+                    did = int(d.get("id") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if did and did not in known and len(known) + len(extra) < cap:
+                    extra.append(did)
+            fetched += len(hits)
+            if fetched >= int(page.get("total") or 0) or len(known) + len(extra) >= cap:
+                break
+        return extra
 
     async def list_collection_designs(self, collection_id: int, page_size: int = 100) -> list[dict[str, Any]]:
         """Walk pagination and return all designs in a collection."""
@@ -511,7 +590,9 @@ class MakerWorldClient:
             raise MakerWorldError(f"Invalid download URL: {e}") from e
         host = (parsed.hostname or "").lower()
         if host.endswith(".amazonaws.com"):
-            return await self._download_s3_verbatim(url, dest_path)
+            # urllib is synchronous; run it in a thread so a large S3
+            # transfer can't stall the event loop (UI, scheduler, thumbs).
+            return await asyncio.to_thread(self._download_s3_verbatim, url, dest_path)
         try:
             async with self._client.stream(
                 "GET", url, headers={"User-Agent": settings.user_agent}
@@ -528,9 +609,14 @@ class MakerWorldClient:
         except httpx.HTTPError as e:
             raise MakerWorldError(f"Download failed: {e}") from e
 
-    async def _download_s3_verbatim(self, url: str, dest_path: Path) -> tuple[int, str]:
+    def _download_s3_verbatim(self, url: str, dest_path: Path) -> tuple[int, str]:
         """Fetch an S3 presigned URL with urllib, which transmits the URL
-        verbatim (httpx would re-encode the query and break SigV4)."""
+        verbatim (httpx would re-encode the query and break SigV4).
+
+        Deliberately SYNCHRONOUS: it runs inside a worker thread via
+        asyncio.to_thread (see download_file), so a large transfer blocks
+        the thread, never the event loop.
+        """
         import urllib.request
 
         req = urllib.request.Request(url, headers={"User-Agent": settings.user_agent})
@@ -574,6 +660,58 @@ def _safe_json(resp: httpx.Response) -> Any:
         return resp.json()
     except Exception:
         return resp.text[:500]
+
+
+# ---------------------------------------------------------------- shared pool
+# One httpx connection pool per (token, region) identity: repeated API calls
+# reuse warm TLS connections instead of paying a fresh handshake each time.
+# Cookies live on the client too, but pooling is per-identity so nothing
+# leaks across accounts; the anonymous entry only ever accumulates harmless
+# CSRF cookies that the TOTP flow re-mints anyway.
+_client_pool: dict[tuple[str | None, str], MakerWorldClient] = {}
+
+
+def get_client(auth_token: str | None = None, region: str = "global") -> MakerWorldClient:
+    """Return a long-lived pooled client for this (token, region) identity.
+
+    Created on first use, reused after. Pooled clients must NOT be closed
+    by callers — release them with release_client(), which keeps pooled
+    ones warm. When the stored token/region changes, call
+    invalidate_shared_clients() so stale identities are closed and dropped.
+    """
+    key = (auth_token, region)
+    client = _client_pool.get(key)
+    if client is None:
+        client = MakerWorldClient(auth_token=auth_token, region=region)
+        _client_pool[key] = client
+    return client
+
+
+async def release_client(client: MakerWorldClient) -> None:
+    """Release a client after use: pooled ones stay warm, ad-hoc ones close.
+
+    Drop-in replacement for the old `await client.close()` discipline so
+    call sites keep their try/finally shape — the only change is that
+    pooled clients survive the release.
+    """
+    if not any(client is pooled for pooled in _client_pool.values()):
+        await client.close()
+
+
+async def invalidate_shared_clients() -> None:
+    """Close and drop ALL pooled clients.
+
+    Must be called whenever the stored token or region changes (login,
+    verify, token paste, logout) so the next call with new credentials
+    builds a fresh client and the stale identity's connections are freed.
+    """
+    pooled = list(_client_pool.values())
+    _client_pool.clear()
+    for client in pooled:
+        try:
+            await client.close()
+        except Exception:  # noqa: BLE001 — teardown must never raise
+            logger.warning("error closing pooled MakerWorld client", exc_info=True)
 
 
 def _filename_from_response(resp: httpx.Response, url: str) -> str:

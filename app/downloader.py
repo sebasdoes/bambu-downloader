@@ -16,7 +16,9 @@ from .makerworld import (
     CaptchaError,
     MakerWorldClient,
     MakerWorldError,
+    get_client,
     parse_model_url,
+    release_client,
 )
 
 logger = logging.getLogger(__name__)
@@ -83,10 +85,28 @@ class DownloadManager:
         Anonymous design lookups, one at a time with a small delay — same
         politeness rules as syncs so the anti-abuse layer stays calm. Absent
         values are stored as "" (checked) so they aren't re-fetched every boot.
+
+        Scan watermark: after a scan that found nothing missing, later boots
+        re-check only rows updated since that scan (new downloads, status
+        changes) instead of statting every file in the library. A non-empty
+        result clears the watermark so the next boot re-scans fully to
+        verify the backfill took.
         """
-        rows = self.db.models_missing_meta()
+        scan_at, clean = self.db.meta_scan_state()
+        since = scan_at if (clean and scan_at) else None
+        rows = self.db.models_missing_meta(since)
         if not rows:
+            self.db.mark_meta_scan(clean=True)
+            if since:
+                logger.info("Metadata scan: nothing new since %s (incremental)", scan_at)
             return
+        if since:
+            logger.info("Metadata scan: %d candidates updated since %s", len(rows), scan_at)
+        else:
+            logger.info("Metadata scan: full pass (%d models)", len(rows))
+        # Clear the watermark up front: this pass found work, so the next
+        # boot must re-scan from scratch to verify the fixes landed.
+        self.db.mark_meta_scan(clean=False)
         logger.info("Backfilling metadata for %d models…", len(rows))
         client = self._client()
         try:
@@ -107,14 +127,20 @@ class DownloadManager:
                 except MakerWorldError as e:
                     logger.warning("metadata backfill for %s failed: %s", design_id, e)
         finally:
-            await client.close()
+            await release_client(client)
         logger.info("Metadata backfill done")
 
     def _client(self) -> MakerWorldClient:
-        """Build an API client carrying the stored token + region (or None)."""
+        """Return the pooled API client for the stored token + region.
+
+        Pooled: the httpx connection pool (and its warm TLS connections) is
+        shared across downloads, syncs and backfills. Never close the
+        returned client — release_client() in the finally blocks does the
+        right thing (keeps pooled ones warm, closes ad-hoc ones).
+        """
         token = self.db.get_meta("bambu_token")
         region = self.db.get_meta("bambu_region") or "global"
-        return MakerWorldClient(auth_token=token, region=region)
+        return get_client(auth_token=token, region=region)
 
     async def refresh_my_collections(self) -> dict[str, Any]:
         """Fetch the user's own MakerWorld collections and cache them.
@@ -132,7 +158,7 @@ class DownloadManager:
         try:
             mine = await client.list_my_collections()
         finally:
-            await client.close()
+            await release_client(client)
         self.db.replace_remote_collections(mine)
         await add_event(
             "sync",
@@ -152,7 +178,7 @@ class DownloadManager:
             design = await client.get_design(design_id)
             instances_env = await client.get_design_instances(design_id)
         finally:
-            await client.close()
+            await release_client(client)
         instances = instances_env.get("hits") or []
         return {
             "design_id": design_id,
@@ -330,7 +356,7 @@ class DownloadManager:
                     "size": size,
                 }
             finally:
-                await client.close()
+                await release_client(client)
 
     async def sync_collection(self, collection_id: int) -> dict[str, Any]:
         """Download all new models from a collection; returns a summary dict.
@@ -351,7 +377,7 @@ class DownloadManager:
             title = str(info.get("title") or f"collection-{collection_id}")
             designs = await client.list_collection_designs(collection_id)
         finally:
-            await client.close()
+            await release_client(client)
 
         self.db.upsert_collection(collection_id, title, coll["url"], coll["sync_interval_minutes"])
 

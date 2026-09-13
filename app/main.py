@@ -8,7 +8,7 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -16,7 +16,7 @@ from . import routes
 from .config import settings
 from .db import Database
 from .downloader import DownloadManager
-from .makerworld import MakerWorldClient, MakerWorldError
+from .makerworld import MakerWorldError, get_client, invalidate_shared_clients, release_client
 from .scheduler import SyncScheduler
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -74,6 +74,9 @@ async def lifespan(app: FastAPI):
         logger.info("Shutting down — stopping scheduler…")
         meta_task.cancel()
         await scheduler.stop()
+        # Release every pooled httpx connection so sockets don't outlive
+        # the loop and trip 'Event loop is closed' warnings on shutdown.
+        await invalidate_shared_clients()
         logger.info("Shutdown complete")
 
 
@@ -101,15 +104,25 @@ def _sniff_media(blob: bytes) -> str:
     return "image/jpeg"
 
 
+def _thumb_etag(blob: bytes, mtime_ns: int | None = None) -> str:
+    """Strong ETag for a cover response (mtime for disk copies, size+width
+    hash for CDN fetches) so revalidating browsers can get a 304."""
+    import hashlib
+
+    basis = f"{mtime_ns or 0}:{len(blob)}".encode()
+    return '"' + hashlib.sha1(basis).hexdigest()[:16] + '"'
+
+
 @app.get("/thumb")
-async def thumbnail(url: str, w: int = 512):
+async def thumbnail(url: str, w: int = 512, if_none_match: str | None = Header(default=None)):
     """Serve a model's cover thumbnail.
 
     Covers are saved as cover.webp next to each model file, so this first
     serves the local copy (no CDN round-trip, works offline). On a miss it
     fetches the resized image from MakerWorld's CDN (Aliyun OSS resize — a
     4MB PNG becomes a ~22KB WebP) and persists it next to the model so the
-    next request is local.
+    next request is local. ETag/If-None-Match: browsers revalidating after
+    their 24h cache expiry get a 304 instead of re-downloading.
     """
     from urllib.parse import urlparse
 
@@ -119,23 +132,37 @@ async def thumbnail(url: str, w: int = 512):
         raise HTTPException(status_code=400, detail="host not allowed")
     w = max(64, min(w, 1920))  # clamp to sane sizes
 
+    def _not_modified(etag: str) -> Response:
+        return Response(
+            status_code=304,
+            headers={"ETag": etag, "Cache-Control": "public, max-age=86400"},
+        )
+
+    def _matches(etag: str, header: str | None) -> bool:
+        if not header:
+            return False
+        return any(candidate.strip() == etag or candidate.strip() == "*" for candidate in header.split(","))
+
     model_file = routes.db.find_model_path_by_cover(url)
     local = (Path(model_file).parent / "cover.webp") if model_file else None
     if local and local.exists():
         blob = local.read_bytes()
+        etag = _thumb_etag(blob, local.stat().st_mtime_ns)
+        if _matches(etag, if_none_match):
+            return _not_modified(etag)
         return Response(
             content=blob,
             media_type=_sniff_media(blob),
-            headers={"Cache-Control": "public, max-age=86400"},
+            headers={"Cache-Control": "public, max-age=86400", "ETag": etag},
         )
 
-    client = MakerWorldClient()
+    client = get_client()  # anonymous pooled — covers are fetched via CDN URL
     try:
         blob = await client.fetch_thumbnail(url, width=w)
     except MakerWorldError:
         raise HTTPException(status_code=502, detail="upstream fetch failed")
     finally:
-        await client.close()
+        await release_client(client)
     # Persist next to the model so future requests (and the file manager)
     # don't need the CDN.
     if local and blob:
@@ -143,10 +170,11 @@ async def thumbnail(url: str, w: int = 512):
             local.write_bytes(blob)
         except OSError:
             logger.warning("could not persist cover at %s", local)
+    etag = _thumb_etag(blob)
     return Response(
         content=blob,
         media_type=_sniff_media(blob),
-        headers={"Cache-Control": "public, max-age=86400"},
+        headers={"Cache-Control": "public, max-age=86400", "ETag": etag},
     )
 
 

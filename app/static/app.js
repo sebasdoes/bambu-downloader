@@ -120,6 +120,9 @@ async function doDownload() {
 
 // ----------------------------------------------------------------- library
 let libFilter = { label: null };  // null = All
+// Library pagination: page size + "shown so far" (reset on filter change).
+const LIB_PAGE = 60;
+let libShown = LIB_PAGE;
 
 async function loadLabels() {
   try {
@@ -136,49 +139,86 @@ async function loadLabels() {
 
 function setLibFilter(label) {
   libFilter.label = label === 'All' ? null : label;
+  libShown = LIB_PAGE;  // new filter -> back to the first page
   loadModels();
   loadLabels();
 }
 
+function modelCard(m) {
+  const mwUrl = `https://makerworld.com/en/models/${m.design_id}${m.slug ? '-' + m.slug : ''}`;
+  const img = m.cover_url
+    ? `<img loading="lazy" src="/thumb?url=${encodeURIComponent(m.cover_url)}" alt="" onerror="this.remove()">`
+    : `<div class="cover-fallback">🖨</div>`;
+  const origin = m.collection_title
+    ? `<span class="tag origin" title="${esc(m.collection_title)}">🗂 ${esc(m.collection_title)}</span>`
+    : `<span class="tag origin" title="Downloaded by URL, not via a collection">🏷 Manual download</span>`;
+  const creator = m.creator ? `by ${esc(m.creator)}` : '';
+  const date = m.created_at ? new Date(m.created_at).toLocaleDateString() : '';
+  return `
+  <div class="model-card">
+    <a class="cover" href="${esc(mwUrl)}" target="_blank" rel="noopener noreferrer" title="View on MakerWorld">${img}</a>
+    <div class="meta title" title="${esc(m.title)}">${esc(m.title)}</div>
+    <div class="meta sub">
+      ${creator ? `<div class="creator">${creator}</div>` : ''}
+      ${date ? `<div class="date">${date}</div>` : ''}
+      design #${m.design_id}${m.profile_id ? ' · plate #' + m.profile_id : ''}<br>
+      ${fmtBytes(m.file_size)} · <span title="${esc(m.file_path)}">${esc(m.filename)}</span>
+    </div>
+    <div class="meta labels">
+      ${origin}
+    </div>
+    <div class="meta actions">
+      <a class="mw-link" href="${esc(mwUrl)}" target="_blank" rel="noopener noreferrer">↗ MakerWorld</a>
+    </div>
+  </div>`;
+}
+
 async function loadModels() {
   try {
-    const qs = libFilter.label ? '?label=' + encodeURIComponent(libFilter.label) : '';
-    const r = await api('/api/models' + qs);
+    const params = new URLSearchParams();
+    if (libFilter.label) params.set('label', libFilter.label);
+    params.set('limit', String(LIB_PAGE));
+    params.set('offset', '0');
+    const r = await api('/api/models?' + params.toString());
     const grid = document.getElementById('modelGrid');
     const empty = document.getElementById('libEmpty');
     document.getElementById('libCount').textContent = `${r.total} models`;
     empty.hidden = r.models.length > 0;
-    grid.innerHTML = r.models.map(m => {
-      const mwUrl = `https://makerworld.com/en/models/${m.design_id}${m.slug ? '-' + m.slug : ''}`;
-      const img = m.cover_url
-        ? `<img loading="lazy" src="/thumb?url=${encodeURIComponent(m.cover_url)}" alt="" onerror="this.remove()">`
-        : `<div class="cover-fallback">🖨</div>`;
-      const origin = m.collection_title
-        ? `<span class="tag origin" title="${esc(m.collection_title)}">🗂 ${esc(m.collection_title)}</span>`
-        : `<span class="tag origin" title="Downloaded by URL, not via a collection">🏷 Manual download</span>`;
-      const creator = m.creator ? `by ${esc(m.creator)}` : '';
-      const date = m.created_at ? new Date(m.created_at).toLocaleDateString() : '';
-      return `
-      <div class="model-card">
-        <a class="cover" href="${esc(mwUrl)}" target="_blank" rel="noopener noreferrer" title="View on MakerWorld">${img}</a>
-        <div class="meta title" title="${esc(m.title)}">${esc(m.title)}</div>
-        <div class="meta sub">
-          ${creator ? `<div class="creator">${creator}</div>` : ''}
-          ${date ? `<div class="date">${date}</div>` : ''}
-          design #${m.design_id}${m.profile_id ? ' · plate #' + m.profile_id : ''}<br>
-          ${fmtBytes(m.file_size)} · <span title="${esc(m.file_path)}">${esc(m.filename)}</span>
-        </div>
-        <div class="meta labels">
-          ${origin}
-        </div>
-        <div class="meta actions">
-          <a class="mw-link" href="${esc(mwUrl)}" target="_blank" rel="noopener noreferrer">↗ MakerWorld</a>
-        </div>
-      </div>`;
-    }).join('');
+    grid.innerHTML = r.models.map(modelCard).join('');
+    updateLoadMore(r.total);
   } catch (e) {
     toast(e.message, 'err');
   }
+}
+
+// Re-fetch the next page and append its cards (Load more button).
+async function loadMoreModels() {
+  const btn = document.getElementById('libMore');
+  if (!btn) return;
+  btn.disabled = true;
+  try {
+    const params = new URLSearchParams();
+    if (libFilter.label) params.set('label', libFilter.label);
+    params.set('limit', String(LIB_PAGE));
+    params.set('offset', String(libShown));
+    const r = await api('/api/models?' + params.toString());
+    const grid = document.getElementById('modelGrid');
+    grid.insertAdjacentHTML('beforeend', r.models.map(modelCard).join(''));
+    libShown += r.models.length;
+    updateLoadMore(r.total);
+  } catch (e) {
+    toast(e.message, 'err');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function updateLoadMore(total) {
+  const btn = document.getElementById('libMore');
+  if (!btn) return;
+  const done = libShown >= total;
+  btn.hidden = done;
+  if (!done) btn.textContent = `Load more (${libShown}/${total})`;
 }
 
 // ----------------------------------------------------------------- collections

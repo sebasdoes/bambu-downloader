@@ -33,9 +33,14 @@ CREATE TABLE IF NOT EXISTS models (
     status TEXT NOT NULL DEFAULT 'completed',
     error TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE(design_id, profile_id)
+    updated_at TEXT NOT NULL
 );
+-- NULL-safe dedup: SQLite treats NULLs as distinct in UNIQUE(design_id,
+-- profile_id), so a plain UNIQUE constraint let repeated plate-less
+-- downloads of the same design pile up duplicate rows. The coalesced index
+-- matches the ON CONFLICT(design_id, COALESCE(profile_id, -1)) upsert.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_models_design_profile
+    ON models(design_id, COALESCE(profile_id, -1));
 
 CREATE TABLE IF NOT EXISTS collections (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -113,6 +118,12 @@ class Database:
                 "ALTER TABLE models ADD COLUMN cover_url TEXT",
                 "ALTER TABLE models ADD COLUMN collection_title TEXT",
                 "ALTER TABLE models ADD COLUMN creator TEXT",
+                # Hot-path indexes (no-op when they exist). cover: looked up
+                # by every /thumb request; created_at: list_models' default
+                # sort; collection_id: the label/collection filters.
+                "CREATE INDEX IF NOT EXISTS idx_models_cover ON models(cover_url)",
+                "CREATE INDEX IF NOT EXISTS idx_models_created ON models(created_at DESC)",
+                "CREATE INDEX IF NOT EXISTS idx_models_collection ON models(collection_id)",
             ):
                 try:
                     conn.execute(stmt)
@@ -141,6 +152,11 @@ class Database:
         conn.row_factory = sqlite3.Row
         try:
             conn.execute("PRAGMA journal_mode=WAL")
+            # WAL's standard pairing: commits don't fsync the WAL on every
+            # transaction (durable through app crashes; only a host power
+            # loss at commit can lose the last transactions, which is
+            # acceptable for this archive — a re-sync refills everything).
+            conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA busy_timeout=30000")
             yield conn
             conn.commit()
@@ -229,7 +245,7 @@ class Database:
                    cover_url, collection_title, creator, filename, file_path, file_size,
                    status, error, created_at, updated_at)
                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                   ON CONFLICT(design_id, profile_id) DO UPDATE SET
+                   ON CONFLICT(design_id, COALESCE(profile_id, -1)) DO UPDATE SET
                      file_path=excluded.file_path, file_size=excluded.file_size,
                      status=excluded.status, error=excluded.error,
                      cover_url=COALESCE(excluded.cover_url, models.cover_url),
@@ -266,15 +282,23 @@ class Database:
             )
 
     # ---- metadata backfill ----
-    def models_missing_meta(self) -> list[dict[str, Any]]:
+    def models_missing_meta(self, since: str | None = None) -> list[dict[str, Any]]:
         """Rows needing a metadata pass: cover/creator never fetched, or the
         cover.webp file is missing next to the model file.
         NULL = never checked; "" = checked, none exists (those rows only
-        re-qualify through the file check when a cover exists)."""
+        re-qualify through the file check when a cover exists).
+
+        since (ISO timestamp): only consider rows whose updated_at is newer.
+        Used with mark_meta_scan() so a boot after a clean scan checks just
+        the new/changed rows instead of re-statting the whole library.
+        """
+        query = "SELECT design_id, profile_id, file_path, cover_url, creator FROM models"
+        params: list[Any] = []
+        if since:
+            query += " WHERE updated_at > ?"
+            params.append(since)
         with self.connect() as conn:
-            rows = conn.execute(
-                "SELECT design_id, profile_id, file_path, cover_url, creator FROM models"
-            ).fetchall()
+            rows = conn.execute(query, params).fetchall()
         missing: list[dict[str, Any]] = []
         for r in rows:
             row = dict(r)
@@ -284,6 +308,22 @@ class Database:
             if needs:
                 missing.append(row)
         return missing
+
+    def meta_scan_state(self) -> tuple[str | None, bool]:
+        """(last full-scan timestamp, last scan found nothing missing)."""
+        scan_at = self.get_meta("meta_scan_at")
+        clean = self.get_meta("meta_scan_clean") == "1"
+        return scan_at, clean
+
+    def mark_meta_scan(self, clean: bool) -> None:
+        """Record a metadata scan's outcome (see models_missing_meta).
+
+        clean=True establishes the watermark: the next boot only re-checks
+        rows updated after this moment. clean=False (missing rows found)
+        clears it, so the boot after backfilling re-scans fully to verify.
+        """
+        self.set_meta("meta_scan_at", utcnow())
+        self.set_meta("meta_scan_clean", "1" if clean else "0")
 
     def find_model_path_by_cover(self, cover_url: str) -> str | None:
         """Locate the model file that owns this cover URL — lets the /thumb
@@ -523,25 +563,36 @@ class Database:
             rows = conn.execute(
                 "SELECT * FROM remote_collections ORDER BY is_default DESC, title COLLATE NOCASE"
             ).fetchall()
-            out: list[dict[str, Any]] = []
+            # Parse every collection's design-id list first, then check them
+            # against the library in ONE query (chunked) — the per-collection
+            # IN(...) loop was N+1 (22 queries per read; the UI polls every
+            # 5 min with the tab open).
+            parsed: list[tuple[sqlite3.Row, list[int]]] = []
+            all_ids: set[int] = set()
             for r in rows:
                 try:
                     ids = [int(x) for x in json.loads(r["design_ids"] or "[]")]
                 except (ValueError, TypeError):
                     ids = []
-                downloaded: set[int] = set()
-                for chunk_start in range(0, len(ids), 500):
-                    chunk = ids[chunk_start:chunk_start + 500]
-                    qmarks = ",".join("?" * len(chunk))
-                    for d in conn.execute(
-                        f"SELECT DISTINCT design_id FROM models WHERE design_id IN ({qmarks})",
-                        chunk,
-                    ):
-                        downloaded.add(int(d["design_id"]))
+                parsed.append((r, ids))
+                all_ids.update(ids)
+            downloaded: set[int] = set()
+            ordered = sorted(all_ids)
+            for chunk_start in range(0, len(ordered), 500):
+                chunk = ordered[chunk_start:chunk_start + 500]
+                qmarks = ",".join("?" * len(chunk))
+                for d in conn.execute(
+                    f"SELECT DISTINCT design_id FROM models WHERE design_id IN ({qmarks})",
+                    chunk,
+                ):
+                    downloaded.add(int(d["design_id"]))
+            out: list[dict[str, Any]] = []
+            for r, ids in parsed:
+                checked_ids = [d for d in ids if d in downloaded]
                 item = dict(r)
                 item["design_ids"] = ids
-                item["checked_ids"] = sorted(d for d in ids if d in downloaded)
-                item["downloaded_count"] = len(item["checked_ids"])
+                item["checked_ids"] = checked_ids
+                item["downloaded_count"] = len(checked_ids)
                 item["downloaded"] = (
                     item["downloaded_count"] >= item["design_count"]
                     if (item["design_count"] or 0) > 0

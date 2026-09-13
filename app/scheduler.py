@@ -63,9 +63,19 @@ class SyncScheduler:
         propagated so shutdown stays prompt.
         """
         logger.info("Collection sync scheduler started")
-        # Refresh the own-collections listing on the first tick after boot
-        # (if signed in), then hourly.
-        self._next_mine_refresh = 0.0
+        # First refresh due immediately — UNLESS the cache is already fresh
+        # (e.g. a quick container restart): then backdate the deadline so the
+        # restart itself causes no MakerWorld request at all.
+        refresh_ms = settings.my_collections_refresh_minutes * 60
+        fetched_at = self.db.remote_collections_fetched_at()
+        if fetched_at:
+            try:
+                age = (datetime.now(timezone.utc) - datetime.fromisoformat(fetched_at)).total_seconds()
+                self._next_mine_refresh = time.monotonic() + max(0.0, refresh_ms - age)
+            except (ValueError, TypeError):
+                self._next_mine_refresh = 0.0
+        else:
+            self._next_mine_refresh = 0.0
         while self._running:
             try:
                 if time.monotonic() >= self._next_mine_refresh:

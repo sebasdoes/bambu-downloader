@@ -20,8 +20,11 @@ from .makerworld import (
     MakerWorldClient,
     MakerWorldError,
     NotFoundError,
+    get_client,
+    invalidate_shared_clients,
     parse_collection_url,
     parse_model_url,
+    release_client,
 )
 from .scheduler import SyncScheduler, trigger_sync
 
@@ -132,11 +135,11 @@ async def _token_state() -> bool | None:
     cached = _token_cache.get(token)
     if cached and cached[0] > time.monotonic():
         return cached[1]
-    client = MakerWorldClient()
+    client = get_client()  # anonymous — token is passed per-request
     try:
         valid = await client.validate_token(token)
     finally:
-        await client.close()
+        await release_client(client)
     if valid is not None:
         _remember_token_state(token, valid)
     return valid
@@ -174,18 +177,22 @@ async def login(req: LoginRequest) -> dict[str, Any]:
     over immediately, else {"step": "email_code"|"totp", "tfa_key"} so the
     UI can collect the second factor (POST /api/auth/verify).
     """
+    # Ad-hoc client on purpose: login flows (CSRF cookies, pre-auth state)
+    # shouldn't share cookies with the pooled identity clients.
     client = MakerWorldClient(region=req.region)
     try:
         result = await client.login(req.email, req.password)
     except MakerWorldError as e:
         raise HTTPException(status_code=400, detail=str(e))
     finally:
-        await client.close()
+        await release_client(client)
     if result["step"] == "done":
         db.set_meta("bambu_token", result["access_token"])
         db.set_meta("bambu_token_refresh", result.get("refresh_token") or "")
         db.set_meta("bambu_email", req.email)
         db.set_meta("bambu_region", req.region)
+        # Stored credentials changed — pooled clients are now stale.
+        await invalidate_shared_clients()
         _remember_token_state(result["access_token"], True)
         return {"step": "done", "email": req.email}
     return result
@@ -198,6 +205,8 @@ async def verify(req: VerifyRequest) -> dict[str, Any]:
     On success the token/refresh token/email/region are persisted and the
     validation cache is primed as valid.
     """
+    # Ad-hoc client on purpose: login flows (CSRF cookies, pre-auth state)
+    # shouldn't share cookies with the pooled identity clients.
     client = MakerWorldClient(region=req.region)
     try:
         if req.tfa_key:
@@ -207,13 +216,15 @@ async def verify(req: VerifyRequest) -> dict[str, Any]:
     except MakerWorldError as e:
         raise HTTPException(status_code=400, detail=str(e))
     finally:
-        await client.close()
+        await release_client(client)
     if result["step"] != "done" or not result.get("access_token"):
         raise HTTPException(status_code=400, detail="Verification failed")
     db.set_meta("bambu_token", result["access_token"])
     db.set_meta("bambu_token_refresh", result.get("refresh_token") or "")
     db.set_meta("bambu_email", req.email)
     db.set_meta("bambu_region", req.region)
+    # Stored credentials changed — pooled clients are now stale.
+    await invalidate_shared_clients()
     _remember_token_state(result["access_token"], True)
     return {"step": "done", "email": req.email}
 
@@ -226,11 +237,11 @@ async def set_token(req: TokenRequest) -> dict[str, Any]:
     unreachable Bambu is a 502 (so the UI can say "try again" rather than
     implying the token is bad).
     """
-    client = MakerWorldClient()
+    client = get_client()  # anonymous — the token travels as a parameter
     try:
         valid = await client.validate_token(req.access_token)
     finally:
-        await client.close()
+        await release_client(client)
     if valid is False:
         raise HTTPException(status_code=400, detail="Token rejected by Bambu Cloud")
     if valid is None:
@@ -241,6 +252,8 @@ async def set_token(req: TokenRequest) -> dict[str, Any]:
     db.set_meta("bambu_token", req.access_token)
     db.set_meta("bambu_email", "token-auth")
     db.set_meta("bambu_region", req.region)
+    # Stored credentials changed — pooled clients are now stale.
+    await invalidate_shared_clients()
     _remember_token_state(req.access_token, True)
     return {"step": "done", "email": "token-auth"}
 
@@ -250,6 +263,9 @@ async def logout() -> dict[str, Any]:
     """Forget the stored credentials (token, refresh token, email)."""
     for key in ("bambu_token", "bambu_token_refresh", "bambu_email"):
         db.delete_meta(key)
+    # Pooled clients carried the old token — drop them so nothing reused
+    # after logout still sends it.
+    await invalidate_shared_clients()
     _token_cache.clear()
     return {"ok": True}
 
@@ -396,7 +412,7 @@ async def add_collection(req: CollectionAddRequest) -> dict[str, Any]:
     # requests get 403 on private collections.
     token = db.get_meta("bambu_token")
     region = db.get_meta("bambu_region") or "global"
-    client = MakerWorldClient(auth_token=token, region=region)
+    client = get_client(auth_token=token, region=region)
     try:
         info = await client.get_collection_info(collection_id)
     except NotFoundError:
@@ -410,7 +426,7 @@ async def add_collection(req: CollectionAddRequest) -> dict[str, Any]:
     except MakerWorldError as e:
         raise HTTPException(status_code=400, detail=str(e))
     finally:
-        await client.close()
+        await release_client(client)
     title = str(info.get("title") or f"collection-{collection_id}")
     db.upsert_collection(collection_id, title, req.url, req.sync_interval_minutes)
     return db.get_collection(collection_id)
