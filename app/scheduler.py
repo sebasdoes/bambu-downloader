@@ -20,6 +20,7 @@ class SyncScheduler:
     """Polls due collections and syncs them, one at a time."""
 
     def __init__(self, db: Database, manager: DownloadManager) -> None:
+        """Store dependencies; `active` maps collection_id -> 'syncing' for the UI."""
         self.db = db
         self.manager = manager
         self._task: asyncio.Task[None] | None = None
@@ -28,6 +29,7 @@ class SyncScheduler:
         self.active: dict[int, str] = {}
 
     def start(self) -> None:
+        """Launch the polling loop (a no-op if it's already running)."""
         if self._task is None or self._task.done():
             self._running = True
             self._task = asyncio.get_running_loop().create_task(self._loop(), name="sync-scheduler")
@@ -49,6 +51,13 @@ class SyncScheduler:
         _manual_tasks.clear()
 
     async def _loop(self) -> None:
+        """Poll forever: sync due collections one at a time, then sleep.
+
+        Each iteration fetches due collections from the DB, syncs them
+        sequentially (skipping any already active), records failures in the
+        activity log, and sleeps for scheduler_interval_seconds. Cancellation
+        is always propagated so shutdown stays prompt.
+        """
         logger.info("Collection sync scheduler started")
         while self._running:
             try:
@@ -88,6 +97,7 @@ class SyncScheduler:
             await asyncio.sleep(settings.scheduler_interval_seconds)
 
     def status(self) -> dict[str, Any]:
+        """Snapshot for /api/status: is the loop running and what's in flight."""
         return {
             "running": self._running,
             "active": dict(self.active),
@@ -100,12 +110,21 @@ _manual_tasks: dict[int, asyncio.Task[None]] = {}
 
 
 def trigger_sync(manager: DownloadManager, collection_id: int) -> bool:
-    """Fire a background sync for a collection. Returns False if one is already running."""
+    """Fire a background sync for a collection. Returns False if one is already running.
+
+    Manual syncs run as their own tasks tracked in _manual_tasks so the
+    scheduler's stop() can cancel them during graceful shutdown.
+    """
     existing = _manual_tasks.get(collection_id)
     if existing and not existing.done():
         return False
 
     async def run() -> None:
+        """Execute the manual sync, surfacing failures to the activity log.
+
+        (Inner closure: trigger_sync's return value already told the caller
+        the sync started; errors land in the Activity tab instead.)
+        """
         try:
             await manager.sync_collection(collection_id)
         except MakerWorldError as e:

@@ -44,6 +44,14 @@ def _probe_writable(path: Path, env_name: str) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Startup/shutdown: build the app's singletons and tear them down cleanly.
+
+    Startup probes the bind mounts for writability (fail fast with podman
+    advice), opens the database, starts the collection scheduler and kicks
+    off the metadata backfill in the background. Shutdown cancels the
+    backfill and scheduler so in-flight syncs stop and SQLite checkpoints —
+    uvicorn runs this on SIGTERM/SIGINT (podman stop / compose stop).
+    """
     Path(settings.download_dir).mkdir(parents=True, exist_ok=True)
     Path(settings.data_dir).mkdir(parents=True, exist_ok=True)
     _probe_writable(Path(settings.download_dir), "BND_DOWNLOAD_DIR")
@@ -144,13 +152,17 @@ async def thumbnail(url: str, w: int = 512):
 
 @app.get("/manifest.webmanifest")
 async def manifest():
+    """Serve the PWA manifest (installability + Android share target)."""
     return FileResponse(_static_dir / "manifest.webmanifest", media_type="application/manifest+json")
 
 
 @app.get("/sw.js")
 async def service_worker():
-    # The service worker itself must NEVER be cached by the browser — a stale
-    # SW keeps serving an old cached shell. Standard practice per MDN.
+    """Serve the service worker with no-store cache headers.
+
+    The service worker itself must NEVER be cached by the browser — a stale
+    SW keeps serving an old cached shell. Standard practice per MDN.
+    """
     return FileResponse(
         _static_dir / "sw.js",
         media_type="application/javascript",
@@ -160,7 +172,7 @@ async def service_worker():
 
 @app.get("/")
 async def index():
-    # Same for the shell: always revalidate so UI updates reach the browser.
+    """Serve the app shell with no-store headers so UI updates land promptly."""
     return FileResponse(
         _static_dir / "index.html",
         headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
@@ -169,6 +181,7 @@ async def index():
 
 @app.get("/favicon.ico")
 async def favicon():
+    """Serve the app icon as the browser favicon."""
     p = _static_dir / "icons" / "icon-192.png"
     if p.exists():
         return FileResponse(p)

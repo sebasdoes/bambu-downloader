@@ -66,6 +66,7 @@ class CaptchaError(MakerWorldError):
     """Bambu is challenging this network with a CAPTCHA (418)."""
 
     def __init__(self, message: str = "") -> None:
+        """Build the error, defaulting to the actionable rate-limit explanation."""
         super().__init__(
             message
             or "MakerWorld's anti-abuse layer is rate-limiting this network (HTTP 418). "
@@ -101,6 +102,11 @@ def parse_collection_url(url: str) -> int:
 
 
 def _detect_captcha(status_code: int, body: dict[str, Any] | str) -> bool:
+    """Heuristically detect Bambu's anti-abuse CAPTCHA challenge (HTTP 418).
+
+    The challenge also leaks into non-418 responses as 'captcha'/'robot'
+    text in the error or message fields, so both are checked.
+    """
     if status_code == 418:
         return True
     if isinstance(body, str) and "captcha" in body.lower():
@@ -116,6 +122,12 @@ class MakerWorldClient:
     """Async client for MakerWorld/Bambu Cloud."""
 
     def __init__(self, auth_token: str | None = None, region: str = "global") -> None:
+        """Create a client; auth_token (when given) is attached to authed calls.
+
+        region selects the Bambu Cloud base ('global' -> api.bambulab.com,
+        'china' -> api.bambulab.cn). The underlying httpx client is honest
+        about its identity (see settings.user_agent) — no browser spoofing.
+        """
         self.auth_token = auth_token
         self.region = region
         base = settings.bambu_api_base if region != "china" else settings.bambu_api_base_cn
@@ -133,6 +145,7 @@ class MakerWorldClient:
         )
 
     async def close(self) -> None:
+        """Release the underlying httpx connection pool (always call this)."""
         await self._client.aclose()
 
     # ------------------------------------------------------------- auth flow
@@ -265,6 +278,15 @@ class MakerWorldClient:
         params: dict[str, Any] | None = None,
         auth: bool = False,
     ) -> Any:
+        """GET a makerworld.com /api/* JSON gateway path with error mapping.
+
+        auth=True attaches the stored Bearer token and raises AuthRequiredError
+        when absent. Responses are translated to typed exceptions: CAPTCHA (418
+        or textual hint), 401 -> expired, 403 with "please log in" -> auth
+        required, other 403s -> ForbiddenError (with a private-collection
+        hint when a token was attached), 404 -> NotFoundError. The gateway
+        sometimes labels JSON as text/plain, so the body is parsed leniently.
+        """
         headers: dict[str, str] = {}
         if auth:
             if not self.auth_token:
@@ -318,6 +340,11 @@ class MakerWorldClient:
         )
 
     async def get_design_instances(self, design_id: int) -> dict[str, Any]:
+        """List a design's plate instances ({"total", "hits": [...]}).
+
+        The token is attached when present for the same public/private
+        reason as get_design.
+        """
         data = await self._mw_get(
             f"/api/v1/design-service/design/{design_id}/instances",
             auth=bool(self.auth_token),
@@ -479,6 +506,11 @@ class MakerWorldClient:
 
 
 def _safe_json(resp: httpx.Response) -> Any:
+    """Parse a response as JSON; on failure return a truncated text snippet.
+
+    Callers use this to inspect error bodies that may be JSON, HTML, or
+    empty — anything parseable beats raising mid error-handling.
+    """
     try:
         return resp.json()
     except Exception:
@@ -486,6 +518,7 @@ def _safe_json(resp: httpx.Response) -> Any:
 
 
 def _filename_from_response(resp: httpx.Response, url: str) -> str:
+    """Pick a download filename: Content-Disposition first, URL tail second."""
     cd = resp.headers.get("content-disposition", "")
     m = re.search(r'filename="?([^";]+)"?', cd)
     if m:
@@ -497,4 +530,5 @@ def _filename_from_response(resp: httpx.Response, url: str) -> str:
 
 # ---------------------------------------------------------------------- misc
 def new_request_id() -> str:
+    """Generate a random hex request id (unused reserved helper)."""
     return uuid.uuid4().hex

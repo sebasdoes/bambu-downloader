@@ -56,6 +56,7 @@ MANUAL_DOWNLOAD_LABEL = "Manual download"
 
 
 def utcnow() -> str:
+    """Current UTC time as an ISO-8601 string (used for all DB timestamps)."""
     return datetime.now(timezone.utc).isoformat()
 
 
@@ -63,6 +64,14 @@ class Database:
     """Thin wrapper over sqlite3 with WAL mode for concurrent access."""
 
     def __init__(self, db_path: str) -> None:
+        """Open (or create) the database and apply migrations.
+
+        Creates the schema if missing, then adds columns introduced after the
+        first release (idempotent ALTERs) and backfills origin labels.
+        Permission failures — the bind-mounted volume not being writable by
+        the container user, common under rootless podman — raise RuntimeError
+        with concrete fix instructions instead of a bare sqlite3 error.
+        """
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self.db_path = db_path
         try:
@@ -107,6 +116,11 @@ class Database:
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
+        """Yield a configured connection; commit on success, rollback on error.
+
+        WAL mode plus a 30s busy timeout let the API, scheduler and backfill
+        task share one database file without 'database is locked' failures.
+        """
         conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
         try:
@@ -122,11 +136,13 @@ class Database:
 
     # ---- meta (key/value for token etc.) ----
     def get_meta(self, key: str) -> str | None:
+        """Read a metadata value (e.g. bambu_token); None if unset."""
         with self.connect() as conn:
             row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
             return row["value"] if row else None
 
     def set_meta(self, key: str, value: str) -> None:
+        """Insert or update a metadata value."""
         with self.connect() as conn:
             conn.execute(
                 "INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -134,15 +150,35 @@ class Database:
             )
 
     def delete_meta(self, key: str) -> None:
+        """Remove a metadata key (no-op if absent)."""
         with self.connect() as conn:
             conn.execute("DELETE FROM meta WHERE key = ?", (key,))
 
     # ---- models ----
     def model_exists(self, design_id: int, profile_id: int | None) -> bool:
+        """Dedup check: has this (design_id, profile_id) pair been downloaded?
+
+        profile_id participates via `IS ?` so a NULL profile (no specific
+        plate) matches only NULL rows — mirroring the UNIQUE constraint.
+        """
         with self.connect() as conn:
             row = conn.execute(
                 "SELECT 1 FROM models WHERE design_id = ? AND profile_id IS ?",
                 (design_id, profile_id),
+            ).fetchone()
+            return row is not None
+
+    def model_exists_any(self, design_id: int) -> bool:
+        """Dedup check: has ANY plate of this design been downloaded?
+
+        Syncs (and fragment-less URLs) don't pin a plate, so their dedup is
+        design-level: a stored row for ANY profile_id counts as already
+        downloaded. Without this, a NULL-vs-stored-plate-id mismatch made
+        every sync re-download the whole collection.
+        """
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM models WHERE design_id = ?", (design_id,)
             ).fetchone()
             return row is not None
 
@@ -163,6 +199,13 @@ class Database:
         collection_title: str | None = None,
         creator: str | None = None,
     ) -> int:
+        """Insert a downloaded model, or refresh an existing (design, profile) row.
+
+        On conflict the file path/size/status are overwritten, while cover,
+        label and creator are only filled in when the new value is non-null
+        (COALESCE) — so a re-download never blanks out metadata a backfill
+        already fetched. Returns the row id.
+        """
         now = utcnow()
         with self.connect() as conn:
             cur = conn.execute(
@@ -199,6 +242,7 @@ class Database:
             return cur.lastrowid or 0
 
     def update_model_status(self, model_row_id: int, status: str, error: str | None = None) -> None:
+        """Update a model row's status/error (e.g. mark a failed download)."""
         with self.connect() as conn:
             conn.execute(
                 "UPDATE models SET status = ?, error = ?, updated_at = ? WHERE id = ?",
@@ -238,9 +282,15 @@ class Database:
         self,
         design_id: int,
         profile_id: int | None,
-        cover_url: str | None,  # "" = checked, no cover; None = leave alone
+        cover_url: str | None,
         creator: str | None = None,
     ) -> None:
+        """Fill in a model's cover URL and/or creator name (backfill path).
+
+        Values are COALESCEd, so None means "leave alone" while "" records
+        "checked, none exists" — the backfill only looks at NULL rows, so
+        empty strings stop it from re-fetching on every boot.
+        """
         with self.connect() as conn:
             conn.execute(
                 """UPDATE models SET
@@ -282,6 +332,7 @@ class Database:
         limit: int = 500,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
+        """List model rows (newest first) with the given origin filters."""
         where_sql, params = self._model_filters(collection_id, no_collection, label)
         query = f"SELECT * FROM models{where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?"
         params = params + [limit, offset]
@@ -294,6 +345,7 @@ class Database:
         no_collection: bool = False,
         label: str | None = None,
     ) -> int:
+        """Count model rows matching the same filters list_models accepts."""
         where_sql, params = self._model_filters(collection_id, no_collection, label)
         query = f"SELECT COUNT(*) as c FROM models{where_sql}"
         with self.connect() as conn:
@@ -327,6 +379,7 @@ class Database:
 
     # ---- collections ----
     def upsert_collection(self, collection_id: int, title: str, url: str, interval: int) -> int:
+        """Register or refresh a followed collection; returns the row id."""
         now = utcnow()
         with self.connect() as conn:
             conn.execute(
@@ -342,10 +395,12 @@ class Database:
             return row["id"]
 
     def list_collections(self) -> list[dict[str, Any]]:
+        """All followed collections, newest first."""
         with self.connect() as conn:
             return [dict(r) for r in conn.execute("SELECT * FROM collections ORDER BY created_at DESC").fetchall()]
 
     def get_collection(self, collection_id: int) -> dict[str, Any] | None:
+        """Fetch one followed collection, or None if not registered."""
         with self.connect() as conn:
             row = conn.execute(
                 "SELECT * FROM collections WHERE collection_id = ?", (collection_id,)
@@ -353,6 +408,7 @@ class Database:
             return dict(row) if row else None
 
     def set_collection_enabled(self, collection_id: int, enabled: bool) -> None:
+        """Pause or resume a collection's automatic syncs."""
         with self.connect() as conn:
             conn.execute(
                 "UPDATE collections SET enabled = ? WHERE collection_id = ?",
@@ -360,6 +416,7 @@ class Database:
             )
 
     def set_collection_interval(self, collection_id: int, minutes: int) -> None:
+        """Change a collection's sync interval (minutes)."""
         with self.connect() as conn:
             conn.execute(
                 "UPDATE collections SET sync_interval_minutes = ? WHERE collection_id = ?",
@@ -367,6 +424,12 @@ class Database:
             )
 
     def record_sync(self, collection_id: int, status: str, new_count: int) -> None:
+        """Stamp a collection with the outcome of a sync run.
+
+        Writing last_sync_at here also schedules the next attempt: the
+        scheduler only picks a collection up again once its interval has
+        elapsed past this timestamp.
+        """
         with self.connect() as conn:
             conn.execute(
                 "UPDATE collections SET last_sync_at = ?, last_sync_status = ?, last_sync_new = ? WHERE collection_id = ?",
@@ -374,6 +437,7 @@ class Database:
             )
 
     def delete_collection(self, collection_id: int) -> None:
+        """Unfollow a collection (model rows are kept; see delete_models)."""
         with self.connect() as conn:
             conn.execute("DELETE FROM collections WHERE collection_id = ?", (collection_id,))
 
@@ -385,7 +449,11 @@ class Database:
             return cur.rowcount or 0
 
     def due_collections(self, now_iso: str) -> list[dict[str, Any]]:
-        """Collections whose interval has elapsed since last sync (or never synced), and enabled."""
+        """Enabled collections whose sync interval has elapsed (or never synced).
+
+        The interval math is done in SQLite via julianday() on the stored
+        ISO timestamps — no date parsing in Python needed.
+        """
         with self.connect() as conn:
             rows = conn.execute(
                 """SELECT * FROM collections WHERE enabled = 1 AND (

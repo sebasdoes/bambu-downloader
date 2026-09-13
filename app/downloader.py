@@ -28,6 +28,10 @@ _MAX_EVENTS = 200
 
 
 async def add_event(kind: str, message: str, **extra: Any) -> None:
+    """Append an activity-log event for the UI (in-memory, capped ring buffer).
+
+    kind is 'download' / 'sync' / 'error'; extra kwargs become extra fields.
+    """
     async with _events_lock:
         _events.append({"ts": time.time(), "kind": kind, "message": message, **extra})
         if len(_events) > _MAX_EVENTS:
@@ -35,10 +39,17 @@ async def add_event(kind: str, message: str, **extra: Any) -> None:
 
 
 def recent_events(limit: int = 50) -> list[dict[str, Any]]:
+    """Return the most recent events, newest first."""
     return list(reversed(_events[-limit:]))
 
 
 def _slugify(text: str) -> str:
+    """Turn an arbitrary title into a safe single path component.
+
+    Lowercases, strips punctuation, collapses whitespace to single hyphens,
+    and truncates to 80 chars so folder names stay filesystem- and
+    file-manager-friendly.
+    """
     text = re.sub(r"[^\w\s-]", "", text.lower()).strip()
     return re.sub(r"[\s_-]+", "-", text)[:80] or "untitled"
 
@@ -60,6 +71,7 @@ class DownloadManager:
     """Coordinates downloads with the SQLite dedup store."""
 
     def __init__(self, db: Database) -> None:
+        """Store the DB handle and create the download concurrency limiter."""
         self.db = db
         # Serialize downloads to be gentle on MakerWorld.
         self._sem = asyncio.Semaphore(2)
@@ -99,12 +111,17 @@ class DownloadManager:
         logger.info("Metadata backfill done")
 
     def _client(self) -> MakerWorldClient:
+        """Build an API client carrying the stored token + region (or None)."""
         token = self.db.get_meta("bambu_token")
         region = self.db.get_meta("bambu_region") or "global"
         return MakerWorldClient(auth_token=token, region=region)
 
     async def resolve_design(self, url: str) -> dict[str, Any]:
-        """Fetch metadata for a model URL (anonymous)."""
+        """Preview a model URL: design metadata + plate instances, no download.
+
+        Also reports whether the (design_id, profile_id) pair is already in
+        the library so the UI can show an "already downloaded" hint.
+        """
         design_id, profile_id = parse_model_url(url)
         client = self._client()
         try:
@@ -118,7 +135,11 @@ class DownloadManager:
             "profile_id": profile_id,
             "design": design,
             "instances": instances,
-            "already_downloaded": self.db.model_exists(design_id, profile_id),
+            "already_downloaded": (
+                self.db.model_exists(design_id, profile_id)
+                if profile_id
+                else self.db.model_exists_any(design_id)
+            ),
         }
 
     async def download_model(
@@ -134,7 +155,11 @@ class DownloadManager:
         """
         design_id, profile_id = parse_model_url(url)
 
-        if self.db.model_exists(design_id, profile_id):
+        # Dedup: exact (design_id, profile_id) pair when the URL pins a
+        # plate, otherwise design-level — ANY plate already downloaded
+        # counts, because we'd resolve to (and re-store) the same default
+        # plate anyway.
+        if self.db.model_exists_any(design_id) if profile_id is None else self.db.model_exists(design_id, profile_id):
             return {"status": "exists", "design_id": design_id, "profile_id": profile_id}
 
         async with self._sem:
@@ -264,10 +289,13 @@ class DownloadManager:
                     collection_title=coll_title,
                     creator=str(creator) if creator else None,
                 )
+                origin = f" from “{coll_title}”" if coll_title else " (manual download)"
                 await add_event(
                     "download",
-                    f"Downloaded “{title}” ({size // 1024} KB)",
+                    f"Downloaded “{title}”{origin} ({size // 1024} KB)",
                     design_id=design_id,
+                    collection_id=collection_id,
+                    collection_title=coll_title,
                 )
                 return {
                     "status": "downloaded",
@@ -281,7 +309,15 @@ class DownloadManager:
                 await client.close()
 
     async def sync_collection(self, collection_id: int) -> dict[str, Any]:
-        """Download all new models from a collection. Returns summary."""
+        """Download all new models from a collection; returns a summary dict.
+
+        Already-downloaded designs are skipped (dedup by design_id), a
+        politeness delay is kept between downloads, and the whole run stops
+        early on auth-required or CAPTCHA aborts — partial progress is
+        recorded via record_sync. The returned dict carries new/total
+        counts, per-model errors, and a status string ('ok', 'partial …',
+        'auth-required' or 'captcha').
+        """
         coll = self.db.get_collection(collection_id)
         if not coll:
             raise MakerWorldError("Collection is not registered")
@@ -303,7 +339,7 @@ class DownloadManager:
             design_id = int(hit.get("id") or 0)
             if not design_id:
                 continue
-            if self.db.model_exists(design_id, None):
+            if self.db.model_exists_any(design_id):
                 continue
             # Politeness: keep a gap between downloads (and retries) so
             # MakerWorld's anti-abuse layer (HTTP 418) doesn't flag the
@@ -358,7 +394,12 @@ class DownloadManager:
 
 
 def _find_url(payload: Any) -> str | None:
-    """Recursively find the first http(s) URL in a JSON payload."""
+    """Recursively find the first http(s) URL in a JSON-like payload.
+
+    Bambu's download manifests aren't a stable shape across endpoints, so
+    download_url is extracted generically: known keys first ('url',
+    'downloadUrl', 'download_url'), then a depth-first value walk.
+    """
     if isinstance(payload, str):
         return payload if payload.startswith("http") else None
     if isinstance(payload, dict):
@@ -379,6 +420,12 @@ def _find_url(payload: Any) -> str | None:
 
 
 def _safe_filename(name: str) -> str:
+    """Sanitize a remote filename into a safe local file name.
+
+    Replaces anything but ASCII letters/digits/._- with underscores, refuses
+    hidden-dotfile names, and truncates to 150 chars — no traversal, no
+    control characters, no Unicode surprises on the host filesystem.
+    """
     name = re.sub(r"[^A-Za-z0-9._-]", "_", name)
     if not name or name.startswith("."):
         name = "model_" + name

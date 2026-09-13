@@ -1,9 +1,15 @@
-"""Bambu Downloader — configuration loaded from environment variables."""
+"""Bambu Downloader — configuration loaded from environment variables.
+
+Every setting maps to a BND_* environment variable; all are optional and
+default to values that work in the container image. The settings object is
+instantiated once at import time (`settings`).
+"""
 
 import os
 
 
 def _env(key: str, default: str) -> str:
+    """Read an environment variable, falling back to a default string."""
     return os.environ.get(key, default)
 
 
@@ -11,6 +17,11 @@ class Settings:
     """App settings, sourced from the environment."""
 
     def __init__(self) -> None:
+        """Read all BND_* environment variables into typed settings.
+
+        Values are captured once at import time; per-setting comments below
+        explain the anti-abuse / security reasoning behind each default.
+        """
         self.download_dir: str = _env("BND_DOWNLOAD_DIR", "/app/downloads")
         self.data_dir: str = _env("BND_DATA_DIR", "/app/data")
         self.db_path: str = _env("BND_DB_PATH", os.path.join(self.data_dir, "bambu_downloader.db"))

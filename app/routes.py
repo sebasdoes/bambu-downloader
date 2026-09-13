@@ -47,6 +47,11 @@ scheduler: SyncScheduler
 
 
 def init(database: Database, dl_manager: DownloadManager, sched: SyncScheduler) -> None:
+    """Wire the module-level singletons from main.py's lifespan.
+
+    Routes import the module, not instances, to avoid import cycles; this is
+    called once at startup before any request is served.
+    """
     global db, manager, scheduler
     db = database
     manager = dl_manager
@@ -54,12 +59,20 @@ def init(database: Database, dl_manager: DownloadManager, sched: SyncScheduler) 
 
 
 class LoginRequest(BaseModel):
+    """Body for POST /api/auth/login: credentials + account region."""
+
     email: str
     password: str
     region: str = "global"
 
 
 class VerifyRequest(BaseModel):
+    """Body for POST /api/auth/verify: the 2FA code completing a login.
+
+    tfa_key selects the TOTP flow (from the login response); without it the
+    emailed code flow is used.
+    """
+
     email: str = ""
     code: str
     tfa_key: str = ""
@@ -67,20 +80,28 @@ class VerifyRequest(BaseModel):
 
 
 class TokenRequest(BaseModel):
+    """Body for POST /api/auth/token: paste an existing Bambu access token."""
+
     access_token: str
     region: str = "global"
 
 
 class DownloadRequest(BaseModel):
+    """Body for POST /api/download and /api/resolve: a MakerWorld model URL."""
+
     url: str
 
 
 class CollectionAddRequest(BaseModel):
+    """Body for POST /api/collections: a collection URL + sync interval."""
+
     url: str
     sync_interval_minutes: int = 360
 
 
 class CollectionUpdateRequest(BaseModel):
+    """Body for PATCH /api/collections/{id}: interval and/or enabled flag."""
+
     sync_interval_minutes: int | None = None
     enabled: bool | None = None
 
@@ -94,6 +115,11 @@ _token_cache: dict[str, tuple[float, bool]] = {}
 
 
 def _remember_token_state(token: str, valid: bool) -> None:
+    """Cache a token validation result for _TOKEN_CHECK_TTL seconds.
+
+    The cache holds a single entry (single-user app): a new login clears any
+    previous token's state so its status is re-checked fresh.
+    """
     _token_cache.clear()  # single-user app: only the current token matters
     _token_cache[token] = (time.monotonic() + _TOKEN_CHECK_TTL, valid)
 
@@ -118,6 +144,12 @@ async def _token_state() -> bool | None:
 
 @router.get("/status")
 async def status() -> dict[str, Any]:
+    """App overview for the header badge and Settings tab.
+
+    Reports sign-in state (with a cached live token check — tri-state, so a
+    Bambu outage never shows as signed-out), library/collection counts and
+    scheduler health.
+    """
     token = db.get_meta("bambu_token")
     token_email = db.get_meta("bambu_email")
     token_valid = await _token_state() if token else None
@@ -136,6 +168,12 @@ async def status() -> dict[str, Any]:
 # -------------------------------------------------------------------- auth
 @router.post("/auth/login")
 async def login(req: LoginRequest) -> dict[str, Any]:
+    """Start a Bambu Cloud login with email + password.
+
+    Returns {"step": "done"} and persists the token when Bambu hands one
+    over immediately, else {"step": "email_code"|"totp", "tfa_key"} so the
+    UI can collect the second factor (POST /api/auth/verify).
+    """
     client = MakerWorldClient(region=req.region)
     try:
         result = await client.login(req.email, req.password)
@@ -155,6 +193,11 @@ async def login(req: LoginRequest) -> dict[str, Any]:
 
 @router.post("/auth/verify")
 async def verify(req: VerifyRequest) -> dict[str, Any]:
+    """Complete login with the emailed code or a TOTP code.
+
+    On success the token/refresh token/email/region are persisted and the
+    validation cache is primed as valid.
+    """
     client = MakerWorldClient(region=req.region)
     try:
         if req.tfa_key:
@@ -177,6 +220,12 @@ async def verify(req: VerifyRequest) -> dict[str, Any]:
 
 @router.post("/auth/token")
 async def set_token(req: TokenRequest) -> dict[str, Any]:
+    """Sign in by pasting an existing Bambu Cloud access token.
+
+    The token is validated against Bambu first: a rejection is a 400, an
+    unreachable Bambu is a 502 (so the UI can say "try again" rather than
+    implying the token is bad).
+    """
     client = MakerWorldClient()
     try:
         valid = await client.validate_token(req.access_token)
@@ -198,6 +247,7 @@ async def set_token(req: TokenRequest) -> dict[str, Any]:
 
 @router.post("/auth/logout")
 async def logout() -> dict[str, Any]:
+    """Forget the stored credentials (token, refresh token, email)."""
     for key in ("bambu_token", "bambu_token_refresh", "bambu_email"):
         db.delete_meta(key)
     _token_cache.clear()
@@ -207,6 +257,12 @@ async def logout() -> dict[str, Any]:
 # ---------------------------------------------------------------- downloads
 @router.post("/download")
 async def download(req: DownloadRequest) -> dict[str, Any]:
+    """Download a model by URL (dedup: re-downloads report {"status": "exists"}).
+
+    Typed client errors map 1:1 to HTTP codes so the UI can tailor its
+    messages: auth -> 401, not found -> 404, forbidden/private -> 403,
+    rate-limited -> 429, anything else -> 400.
+    """
     try:
         result = await manager.download_model(req.url)
     except AuthRequiredError as e:
@@ -266,17 +322,25 @@ async def model_labels() -> list[dict[str, Any]]:
 
 @router.get("/events")
 async def events(limit: int = 50) -> dict[str, Any]:
+    """Recent activity-log events (in-memory ring buffer, newest first)."""
     return {"events": recent_events(limit)}
 
 
 # -------------------------------------------------------------- collections
 @router.get("/collections")
 async def collections() -> list[dict[str, Any]]:
+    """List all followed collections with their sync state."""
     return db.list_collections()
 
 
 @router.post("/collections")
 async def add_collection(req: CollectionAddRequest) -> dict[str, Any]:
+    """Follow a collection: validate the URL against MakerWorld and register it.
+
+    The stored token is attached so the user's OWN private collections
+    resolve; a 403 from MakerWorld is translated into a hint about private
+    collections needing the owner's account.
+    """
     try:
         collection_id = parse_collection_url(req.url)
     except MakerWorldError as e:
@@ -308,6 +372,7 @@ async def add_collection(req: CollectionAddRequest) -> dict[str, Any]:
 
 @router.patch("/collections/{collection_id}")
 async def update_collection(collection_id: int, req: CollectionUpdateRequest) -> dict[str, Any]:
+    """Update a followed collection's sync interval and/or paused state."""
     if not db.get_collection(collection_id):
         raise HTTPException(status_code=404, detail="Collection not registered")
     if req.sync_interval_minutes is not None:
@@ -363,6 +428,12 @@ async def delete_collection(collection_id: int, delete_files: bool = False) -> d
 
 @router.post("/collections/{collection_id}/sync")
 async def sync_collection_now(collection_id: int) -> dict[str, Any]:
+    """Trigger a background sync of one collection right now.
+
+    Returns {"started": true} or false when a sync for it is already in
+    flight. Requires a stored token (401 otherwise) since every download
+    needs auth.
+    """
     if not db.get_collection(collection_id):
         raise HTTPException(status_code=404, detail="Collection not registered")
     token = db.get_meta("bambu_token")
