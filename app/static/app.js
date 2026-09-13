@@ -63,7 +63,8 @@ function showTab(name) {
   if (name === 'activity') startEventPolling();
   else stopEventPolling();
   if (name === 'library') { loadModels(); loadLabels(); }
-  if (name === 'collections') loadCollections();
+  if (name === 'collections') { startMinePolling(); loadCollections(); }
+  else stopMinePolling();
 }
 
 // ------------------------------------------------------------------ status
@@ -180,7 +181,9 @@ async function loadModels() {
   }
 }
 
-// ------------------------------------------------------------- collections
+// ----------------------------------------------------------------- collections
+let mineTimer = null;
+
 async function addCollection() {
   const url = document.getElementById('collUrl').value.trim();
   if (!url) return;
@@ -190,10 +193,85 @@ async function addCollection() {
     toast(`Following “${c.title}”`, 'ok');
     document.getElementById('collUrl').value = '';
     loadCollections();
+    loadMyCollections();
     loadStatus();
   } catch (e) {
     toast(e.message, 'err');
   }
+}
+
+// Own MakerWorld collections (hourly-refreshed cache; UI re-polls every 5 min).
+async function loadMyCollections() {
+  try {
+    const r = await api('/api/my-collections');
+    const el = document.getElementById('mineList');
+    const empty = document.getElementById('mineEmpty');
+    const meta = document.getElementById('mineMeta');
+    const hint = document.getElementById('mineHint');
+    if (!r.authenticated) {
+      empty.hidden = false;
+      empty.textContent = 'Sign in (Settings) to see your own collections here.';
+      meta.textContent = '';
+      hint.textContent = '';
+      el.innerHTML = '';
+      return;
+    }
+    empty.hidden = r.collections.length > 0;
+    if (!r.collections.length) empty.textContent = 'Nothing cached yet — click Refresh, or wait for the next hourly fetch.';
+    const when = r.fetched_at ? new Date(r.fetched_at).toLocaleString() : null;
+    meta.textContent = when ? `updated ${when}` : 'not fetched yet';
+    const rows = r.collections.map(c => {
+      const pct = c.design_count ? Math.round(100 * c.downloaded_count / c.design_count) : 0;
+      const state = c.downloaded
+        ? '<span class="mine-check">✓ all downloaded</span>'
+        : (c.downloaded_count > 0
+            ? `<span class="mine-partial">✓ ${c.downloaded_count}/${c.design_count} downloaded</span>`
+            : `<span class="mine-none">${c.design_count} models · none downloaded</span>`);
+      const follow = c.followed
+        ? `<span class="tag ok">following</span>`
+        : `<button class="ghost" onclick="followMine(${c.collection_id}, '${esc(c.slug || String(c.collection_id))}')">Follow</button>`;
+      const mw = `https://makerworld.com/en/collections/${c.collection_id}${c.slug ? '-' + c.slug : ''}`;
+      return `
+      <div class="mine-item">
+        <a class="title" href="${esc(mw)}" target="_blank" rel="noopener noreferrer">${c.title ? esc(c.title) : 'Collection ' + c.collection_id}</a>
+        ${state}
+        <div class="mine-progress" title="${pct}% downloaded"><div style="width:${pct}%"></div></div>
+        ${follow}
+      </div>`;
+    }).join('');
+    el.innerHTML = rows;
+  } catch (e) {
+    toast(e.message, 'err');
+  }
+}
+
+// Follow one of your own collections without typing its URL.
+async function followMine(cid, slug) {
+  try {
+    const url = `https://makerworld.com/en/collections/${cid}-${slug}`;
+    await api('/api/collections', { method: 'POST', body: { url, sync_interval_minutes: 360 } });
+    toast('Collection followed', 'ok');
+    loadCollections();
+    loadMyCollections();
+    loadStatus();
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+// Manual refresh of the own-collections cache (normally fetched hourly).
+async function refreshMyCollections() {
+  try {
+    await api('/api/my-collections/refresh', { method: 'POST' });
+    toast('Your collections refreshed', 'ok');
+    loadMyCollections();
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+function startMinePolling() {
+  loadMyCollections();
+  if (!mineTimer) mineTimer = setInterval(loadMyCollections, 5 * 60 * 1000);
+}
+function stopMinePolling() {
+  if (mineTimer) { clearInterval(mineTimer); mineTimer = null; }
 }
 
 async function loadCollections() {

@@ -18,6 +18,10 @@ Endpoints verified against live traffic on 2026-09-11:
 - Plate 3MF:       GET  {mw}/api/v1/design-service/instance/{instanceId}/f3mf  (auth)
 - Profile DL:      GET  {bambu_api}/v1/iot-service/api/user/profile/{profileId}?model_id=  (auth)
 - Collections tab: GET  {mw}/api/v1/design-service/favorites-collections/tab
+                     (auth; {"total", "hits": [...]} — each hit is one of the
+                     signed-in account's own collections with id/title/slug/
+                     designCnt/isDefault plus an embedded first page of
+                     designs; supports ?limit=&offset= pagination)
 - Collection meta: GET  {mw}/api/v1/design-service/favorites/{cid}/withoutdesign
 - Collection items: GET  {mw}/api/v1/design-service/favorites/{cid}/designs?limit=&offset=
 
@@ -420,6 +424,61 @@ class MakerWorldClient:
             params={"limit": limit, "offset": offset},
             auth=bool(self.auth_token),
         )
+
+    async def get_my_collections_page(self, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+        """One page of the signed-in user's own collections (auth required).
+
+        GET /api/v1/design-service/favorites-collections/tab — verified live:
+        {"total": int, "hits": [<collection>]} where each collection carries
+        id, title, slug, designCnt, isDefault and an embedded `designs` array
+        (the first page of its items, enough to resolve ids for small
+        collections without per-collection round trips).
+        """
+        return await self._mw_get(
+            "/api/v1/design-service/favorites-collections/tab",
+            params={"limit": limit, "offset": offset},
+            auth=True,
+        )
+
+    async def list_my_collections(self, page_size: int = 50) -> list[dict[str, Any]]:
+        """All of the signed-in user's own collections, walking pagination.
+
+        Returns a normalized list of
+        {collection_id, title, slug, design_count, is_default, design_ids}.
+        design_ids comes from the embedded page-1 designs when present; if a
+        collection's designCnt exceeds that page, the remainder is NOT fetched
+        here (the UI's checkmarks are advisory, and syncs do their own full
+        listing). Anonymous tokens are rejected by the endpoint itself via
+        _mw_get's auth handling (AuthRequiredError).
+        """
+        out: list[dict[str, Any]] = []
+        offset = 0
+        while True:
+            data = await self.get_my_collections_page(limit=page_size, offset=offset)
+            hits = data.get("hits") or []
+            for hit in hits:
+                design_ids: list[int] = []
+                for d in (hit.get("designs") or []):
+                    try:
+                        design_ids.append(int(d.get("id") or 0))
+                    except (TypeError, ValueError):
+                        continue
+                design_ids = [i for i in design_ids if i]
+                out.append(
+                    {
+                        "collection_id": int(hit.get("id") or 0),
+                        "title": str(hit.get("title") or ""),
+                        "slug": str(hit.get("slug") or ""),
+                        "design_count": int(hit.get("designCnt") or 0),
+                        "is_default": bool(hit.get("isDefault")),
+                        "design_ids": design_ids,
+                    }
+                )
+            offset += len(hits)
+            total = int(data.get("total") or 0)
+            if not hits or offset >= total:
+                break
+        return [c for c in out if c["collection_id"]]
 
     async def list_collection_designs(self, collection_id: int, page_size: int = 100) -> list[dict[str, Any]]:
         """Walk pagination and return all designs in a collection."""

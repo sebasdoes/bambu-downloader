@@ -76,6 +76,15 @@
   .coll-item .title { font-weight: 600; flex: 1; min-width: 160px; }
   .coll-item .interval { display: flex; align-items: center; gap: 0.4rem; }
   .coll-item input[type=number] { width: 90px; min-width: 90px; }
+  /* "My collections" checklist rows (reuses .tag styles) */
+  .mine-item { display: flex; align-items: center; gap: 0.6rem; padding: 0.55rem 0.25rem; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .mine-item:last-child { border-bottom: none; }
+  .mine-item .title { font-weight: 600; flex: 1; min-width: 140px; overflow-wrap: anywhere; }
+  .mine-check { color: var(--green); font-weight: 700; }
+  .mine-partial { color: var(--yellow); }
+  .mine-none { color: var(--muted); font-weight: 400; }
+  .mine-progress { min-width: 90px; max-width: 140px; height: 6px; border-radius: 999px; background: var(--panel2); border: 1px solid var(--border); overflow: hidden; }
+  .mine-progress > div { height: 100%; background: var(--green); }
   .event { padding: 0.45rem 0; border-bottom: 1px solid var(--border); font-size: 0.85rem; }
   .event:last-child { border-bottom: none; }
   .event time { color: var(--muted); margin-right: 0.5rem; font-variant-numeric: tabular-nums; font-size: 0.75rem; }
@@ -155,6 +164,15 @@
         <button class="primary" onclick="addCollection()">Add</button>
       </div>
       <p class="hint">New models in the collection will be downloaded automatically on each sync. Existing downloads are never duplicated.</p>
+    </div>
+    <div class="card">
+      <h2>Your MakerWorld collections <span class="tag" id="mineMeta"></span>
+        <span class="spacer" style="flex:1"></span>
+        <button class="ghost" onclick="refreshMyCollections()">Refresh</button>
+      </h2>
+      <p class="hint" id="mineHint">All collections from your signed-in account, with ✓ per model already in your library. Refreshes automatically every hour.</p>
+      <div id="mineList"></div>
+      <div class="empty" id="mineEmpty">Sign in and the list appears here.</div>
     </div>
     <div class="card">
       <h2>Followed collections</h2>

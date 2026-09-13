@@ -46,6 +46,13 @@ class Settings:
         # trips on burst patterns; a few seconds between requests keeps it
         # calm. Zero disables the delay.
         self.download_delay_seconds: float = float(_env("BND_DOWNLOAD_DELAY_SECONDS", "3"))
+        # How often the "my collections" listing is re-fetched from
+        # MakerWorld (minutes). Only one light paginated GET every cycle —
+        # hourly by default, and a 15-minute floor keeps accidental very
+        # small values from hammering the anti-abuse layer.
+        self.my_collections_refresh_minutes: int = max(
+            15, int(_env("BND_MY_COLLECTIONS_REFRESH_MINUTES", "60"))
+        )
         # Optional shared secret for the web API. When set, every /api/*
         # request must carry it in the X-API-Key header — protects the stored
         # Bambu token from anyone else on the network. Empty = open (LAN trust).

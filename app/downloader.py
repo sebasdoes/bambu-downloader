@@ -116,6 +116,30 @@ class DownloadManager:
         region = self.db.get_meta("bambu_region") or "global"
         return MakerWorldClient(auth_token=token, region=region)
 
+    async def refresh_my_collections(self) -> dict[str, Any]:
+        """Fetch the user's own MakerWorld collections and cache them.
+
+        Requires a stored token (AuthRequiredError otherwise). The listing
+        request itself is light (one endpoint, paginated); design ids come
+        from the embedded page-1 payloads. Results land in the
+        remote_collections table via replace_remote_collections; download
+        checkmarks are computed at read time against the library. Returns
+        {"collections": <count>, "fetched_at": iso} for the UI.
+        """
+        if not self.db.get_meta("bambu_token"):
+            raise AuthRequiredError("Sign in to MakerWorld first (Settings → Login).")
+        client = self._client()
+        try:
+            mine = await client.list_my_collections()
+        finally:
+            await client.close()
+        self.db.replace_remote_collections(mine)
+        await add_event(
+            "sync",
+            f"Refreshed your MakerWorld collections ({len(mine)} found)",
+        )
+        return {"collections": len(mine), "fetched_at": self.db.remote_collections_fetched_at()}
+
     async def resolve_design(self, url: str) -> dict[str, Any]:
         """Preview a model URL: design metadata + plate instances, no download.
 

@@ -333,6 +333,52 @@ async def collections() -> list[dict[str, Any]]:
     return db.list_collections()
 
 
+@router.get("/my-collections")
+async def my_collections() -> dict[str, Any]:
+    """Your own MakerWorld collections with per-collection download checkmarks.
+
+    Serves the hourly-refreshed cache (remote_collections table) — never hits
+    MakerWorld, so it stays cheap even if the UI polls it. The listing is
+    empty until signed in and either the scheduler's first hourly tick or a
+    manual POST /my-collections/refresh has run. Each item carries
+    downloaded_count / downloaded / checked_ids for the ✓ UI, plus `followed`
+    so the list can show which ones are already being synced.
+    """
+    rows = db.remote_collections()
+    followed = {c["collection_id"]: c for c in db.list_collections()}
+    for row in rows:
+        row["followed"] = row["collection_id"] in followed
+        row["sync_interval_minutes"] = (
+            followed[row["collection_id"]]["sync_interval_minutes"] if row["followed"] else None
+        )
+    return {
+        "collections": rows,
+        "fetched_at": db.remote_collections_fetched_at(),
+        "authenticated": bool(db.get_meta("bambu_token")),
+    }
+
+
+@router.post("/my-collections/refresh")
+async def refresh_my_collections_now() -> dict[str, Any]:
+    """Re-fetch the own-collections listing from MakerWorld right now.
+
+    Normally the scheduler refreshes it hourly; this exists for the "Refresh"
+    button. 401 when signed out, 429 on a CAPTCHA challenge (the listing
+    endpoint is subject to the same anti-abuse layer as everything else).
+    """
+    if not db.get_meta("bambu_token"):
+        raise HTTPException(status_code=401, detail="Sign in to MakerWorld first")
+    try:
+        result = await manager.refresh_my_collections()
+    except AuthRequiredError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+    except CaptchaError as e:
+        raise HTTPException(status_code=429, detail=str(e))
+    except MakerWorldError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return result
+
+
 @router.post("/collections")
 async def add_collection(req: CollectionAddRequest) -> dict[str, Any]:
     """Follow a collection: validate the URL against MakerWorld and register it.

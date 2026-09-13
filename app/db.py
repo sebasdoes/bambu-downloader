@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from contextlib import contextmanager
@@ -47,6 +48,21 @@ CREATE TABLE IF NOT EXISTS collections (
     last_sync_status TEXT,
     last_sync_new INTEGER DEFAULT 0,
     created_at TEXT NOT NULL
+);
+
+-- Snapshot of the signed-in user's own MakerWorld collections, cached from
+-- the favorites-collections/tab endpoint by refresh_my_collections(). This
+-- is a cache only: rows are never deleted (a collection that vanishes on
+-- MakerWorld is marked hidden instead) and following a collection still
+-- writes to `collections`.
+CREATE TABLE IF NOT EXISTS remote_collections (
+    collection_id INTEGER PRIMARY KEY,
+    title TEXT,
+    slug TEXT,
+    design_count INTEGER NOT NULL DEFAULT 0,
+    is_default INTEGER NOT NULL DEFAULT 0,
+    design_ids TEXT,
+    fetched_at TEXT NOT NULL
 );
 """
 
@@ -463,3 +479,79 @@ class Database:
                 (now_iso,),
             ).fetchall()
             return [dict(r) for r in rows]
+
+    # ---- remote collections (own MakerWorld collections, cached) ----
+    def replace_remote_collections(self, rows: list[dict[str, Any]]) -> None:
+        """Overwrite the remote_collections cache with a fresh listing.
+
+        Rows carry {collection_id, title, slug, design_count, is_default,
+        design_ids} where design_ids is a list of ints. This is the only
+        writer of the table: rows that disappeared from MakerWorld simply
+        vanish from the cache view, and nothing here touches the followed
+        `collections` table.
+        """
+        now = utcnow()
+        with self.connect() as conn:
+            conn.execute("DELETE FROM remote_collections")
+            conn.executemany(
+                """INSERT INTO remote_collections(
+                       collection_id, title, slug, design_count, is_default, design_ids, fetched_at
+                   ) VALUES(?,?,?,?,?,?,?)""",
+                [
+                    (
+                        int(r["collection_id"]),
+                        r.get("title") or "",
+                        r.get("slug") or "",
+                        int(r.get("design_count") or 0),
+                        1 if r.get("is_default") else 0,
+                        json.dumps(list(r.get("design_ids") or [])),
+                        now,
+                    )
+                    for r in rows
+                ],
+            )
+
+    def remote_collections(self) -> list[dict[str, Any]]:
+        """Cached own-collections snapshot, each annotated with download state.
+
+        Adds: downloaded_count (library rows among this collection's
+        designs), downloaded (count >= design_count when the count is
+        known), and checked_ids (which of the stored design ids are already
+        in the library) so the UI can render per-item checkmarks.
+        """
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM remote_collections ORDER BY is_default DESC, title COLLATE NOCASE"
+            ).fetchall()
+            out: list[dict[str, Any]] = []
+            for r in rows:
+                try:
+                    ids = [int(x) for x in json.loads(r["design_ids"] or "[]")]
+                except (ValueError, TypeError):
+                    ids = []
+                downloaded: set[int] = set()
+                for chunk_start in range(0, len(ids), 500):
+                    chunk = ids[chunk_start:chunk_start + 500]
+                    qmarks = ",".join("?" * len(chunk))
+                    for d in conn.execute(
+                        f"SELECT DISTINCT design_id FROM models WHERE design_id IN ({qmarks})",
+                        chunk,
+                    ):
+                        downloaded.add(int(d["design_id"]))
+                item = dict(r)
+                item["design_ids"] = ids
+                item["checked_ids"] = sorted(d for d in ids if d in downloaded)
+                item["downloaded_count"] = len(item["checked_ids"])
+                item["downloaded"] = (
+                    item["downloaded_count"] >= item["design_count"]
+                    if (item["design_count"] or 0) > 0
+                    else False
+                )
+                out.append(item)
+            return out
+
+    def remote_collections_fetched_at(self) -> str | None:
+        """When the cache was last refreshed (None = never)."""
+        with self.connect() as conn:
+            row = conn.execute("SELECT MAX(fetched_at) AS t FROM remote_collections").fetchone()
+            return row["t"] if row else None

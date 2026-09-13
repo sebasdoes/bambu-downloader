@@ -27,6 +27,8 @@ class SyncScheduler:
         self._running = False
         # In-flight syncs for UI feedback.
         self.active: dict[int, str] = {}
+        # monotonic deadline for the next automatic "my collections" refresh.
+        self._next_mine_refresh = 0.0
 
     def start(self) -> None:
         """Launch the polling loop (a no-op if it's already running)."""
@@ -55,12 +57,20 @@ class SyncScheduler:
 
         Each iteration fetches due collections from the DB, syncs them
         sequentially (skipping any already active), records failures in the
-        activity log, and sleeps for scheduler_interval_seconds. Cancellation
-        is always propagated so shutdown stays prompt.
+        activity log, and sleeps for scheduler_interval_seconds. Once per
+        my_collections_refresh_minutes it also re-fetches the user's own
+        collection listing into the remote cache. Cancellation is always
+        propagated so shutdown stays prompt.
         """
         logger.info("Collection sync scheduler started")
+        # Refresh the own-collections listing on the first tick after boot
+        # (if signed in), then hourly.
+        self._next_mine_refresh = 0.0
         while self._running:
             try:
+                if time.monotonic() >= self._next_mine_refresh:
+                    await self._refresh_my_collections()
+                    self._next_mine_refresh = time.monotonic() + settings.my_collections_refresh_minutes * 60
                 due = self.db.due_collections(utcnow())
                 for coll in due:
                     cid = coll["collection_id"]
@@ -96,12 +106,36 @@ class SyncScheduler:
             # Poll interval is configurable; a small floor avoids busy-looping.
             await asyncio.sleep(settings.scheduler_interval_seconds)
 
+    async def _refresh_my_collections(self) -> None:
+        """Re-fetch the signed-in user's collection listing into the cache.
+
+        Best-effort: signed-out users are skipped silently (no token), and a
+        failure is logged but never disturbs the sync loop — a stale listing
+        is better than a crashed scheduler. Manual refreshes from the UI go
+        through the API route instead (they surface errors to the user).
+        """
+        if not self.db.get_meta("bambu_token"):
+            return
+        try:
+            await self.manager.refresh_my_collections()
+            logger.info("Own-collections listing refreshed")
+        except AuthRequiredError:
+            return  # token vanished mid-session; nothing to do this cycle
+        except CaptchaError:
+            logger.warning("Own-collections refresh skipped — rate-limited (CAPTCHA)")
+        except MakerWorldError as e:
+            logger.warning("Own-collections refresh failed: %s", e)
+
     def status(self) -> dict[str, Any]:
         """Snapshot for /api/status: is the loop running and what's in flight."""
         return {
             "running": self._running,
             "active": dict(self.active),
             "checked_at": datetime.now(timezone.utc).isoformat(),
+            "next_my_collections_refresh": (
+                max(0.0, self._next_mine_refresh - time.monotonic())
+                if self._running else None
+            ),
         }
 
 
