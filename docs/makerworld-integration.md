@@ -61,11 +61,25 @@ Legacy fallbacks — DEAD for newer designs (HTTP 400 when authed, 403 anon);
 kept only as fallbacks for old models.
 
 Collections
-  GET {mw}/api/v1/design-service/favorites-collections/tab?limit=&offset=   (Bearer)
-      → {"total", "hits": [ {id,title,slug,designCnt,isDefault,
-                             designs: <embedded page 1, ~100 max>} ]}
-  GET {mw}/api/v1/design-service/favorites/{cid}/withoutdesign              (collection meta)
-  GET {mw}/api/v1/design-service/favorites/{cid}/designs?limit=100&offset=  (paged items)
+  GET {mw}/api/v1/design-service/my/favorites/listlite                   (Bearer)
+      → the SIGNED-IN ACCOUNT'S OWN collections:
+        {"total", "hits": [ {id,title,designCnt,isDefault,designCover} ],
+         "default": <the isDefault collection>}
+        ⚠ ignores limit/offset — always returns everything in one shot.
+        ⚠ NO slug and NO embedded designs: the UI needs
+          makerworld.com/en/collections/{cid}-{slug} links (a bare id does
+          NOT resolve) and design ids for the ✓ checkmarks, so each
+          collection is enriched via withoutdesign (slug) + the designs
+          pager (ids). Also verified live: the same path exists on
+          {bambu_api}/v1 (api.bambulab.com) — identical payload.
+  GET {mw}/api/v1/design-service/favorites-collections/tab?limit=&offset= (Bearer)
+      ⚠ NOT the user's collections! Verified live 2026-09-13: MakerWorld's
+        curated official tab bar — all 22 hits authored by the "MakerWorld"
+        account (uid 1983921364). It is what the collections page shows
+        signed-in users by default. Do not use for "your collections".
+  GET {mw}/api/v1/design-service/favorites/{cid}/withoutdesign            (collection meta)
+  GET {mw}/api/v1/design-service/favorites/{cid}/designs?limit=100&offset= (paged items)
+      ⚠ the pager caps every page at 64 hits server-side regardless of limit.
 ```
 
 Privacy semantics worth remembering:

@@ -18,10 +18,14 @@ Endpoints verified against live traffic on 2026-09-11:
 - Plate 3MF:       GET  {mw}/api/v1/design-service/instance/{instanceId}/f3mf  (auth)
 - Profile DL:      GET  {bambu_api}/v1/iot-service/api/user/profile/{profileId}?model_id=  (auth)
 - Collections tab: GET  {mw}/api/v1/design-service/favorites-collections/tab
-                     (auth; {"total", "hits": [...]} — each hit is one of the
-                     signed-in account's own collections with id/title/slug/
-                     designCnt/isDefault plus an embedded first page of
-                     designs; supports ?limit=&offset= pagination)
+                     (auth; MakerWorld's CURATED official tab bar — NOT the
+                     user's collections; documented so nobody picks it again)
+- My collections:  GET  {mw}/api/v1/design-service/my/favorites/listlite
+                     (auth; {"total", "hits": [...], "default": <collection>}
+                     — the SIGNED-IN ACCOUNT'S OWN collections: id/title/
+                     designCnt/isDefault/designCover. Ignores limit/offset,
+                     always returns everything; NO slug and NO embedded
+                     designs — enrich via withoutdesign + the designs pager)
 - Collection meta: GET  {mw}/api/v1/design-service/favorites/{cid}/withoutdesign
 - Collection items: GET  {mw}/api/v1/design-service/favorites/{cid}/designs?limit=&offset=
 
@@ -48,7 +52,7 @@ logger = logging.getLogger(__name__)
 # Bambu's 401 signature for an expired session.
 EXPIRED_401_CODES = {4}
 
-# Design-id top-up paging (list_my_collections completing big collections):
+# Design-id paging (list_my_collections fetching each collection's ids):
 # page size per request and a hard page-count guard against endless loops.
 CAP_PAGE_SIZE = 100
 CAP_MAX_PAGES = 10
@@ -526,93 +530,117 @@ class MakerWorldClient:
     async def get_my_collections_page(
         self, limit: int = 50, offset: int = 0
     ) -> dict[str, Any]:
-        """One page of the signed-in user's own collections (auth required).
+        """The signed-in user's own collections (auth required).
 
-        GET /api/v1/design-service/favorites-collections/tab — verified live:
-        {"total": int, "hits": [<collection>]} where each collection carries
-        id, title, slug, designCnt, isDefault and an embedded `designs` array
-        (the first page of its items, enough to resolve ids for small
-        collections without per-collection round trips).
+        GET /api/v1/design-service/my/favorites/listlite — verified live
+        2026-09-13: {"total": int, "hits": [<collection>], "default":
+        <collection>} where each hit carries id, title, designCnt,
+        isDefault and designCover. total matches user-service/my/profile's
+        favoritesCount (the own-collections count).
+
+        NOT favorites-collections/tab: that returns MakerWorld's curated
+        official tab bar (all hits authored by creator uid 1983921364
+        "MakerWorld"), which is what the collections page shows logged-in
+        users by default. The personal list lives under
+        design-service/my/*.
+
+        limit/offset are accepted for API compatibility but the server
+        ignores them and returns the full list in one shot (verified).
         """
         return await self._mw_get(
-            "/api/v1/design-service/favorites-collections/tab",
+            "/api/v1/design-service/my/favorites/listlite",
             params={"limit": limit, "offset": offset},
             auth=True,
         )
+
+    async def _slug_map(self, collection_ids: list[int]) -> dict[int, str]:
+        """Fetch {collection_id: slug} via favorites/{cid}/withoutdesign.
+
+        listlite doesn't include slugs, but the UI builds
+        makerworld.com/en/collections/{cid}-{slug} links and a bare id
+        without the slug does NOT resolve on the site (verified), so every
+        collection needs one withoutdesign round trip. Sequential + polite:
+        a small delay between requests keeps the anti-abuse layer calm; a
+        failure for one collection yields no slug for it (title still
+        shown, link falls back to the followed-collection URL path).
+        """
+        slugs: dict[int, str] = {}
+        for i, cid in enumerate(collection_ids):
+            if i > 0 and settings.download_delay_seconds > 0:
+                await asyncio.sleep(settings.download_delay_seconds)
+            try:
+                info = await self.get_collection_info(cid)
+                slug = str(info.get("slug") or "")
+                if slug:
+                    slugs[cid] = slug
+            except MakerWorldError as e:
+                # One shy collection must not fail the listing; the UI just
+                # loses the makerworld.com link for it.
+                logger.warning("slug lookup for collection %s failed: %s", cid, e)
+        return slugs
 
     async def list_my_collections(
         self,
         page_size: int = 50,
         max_designs_per_collection: int = 1000,
     ) -> list[dict[str, Any]]:
-        """All of the signed-in user's own collections, walking pagination.
+        """All of the signed-in user's own collections.
 
         Returns a normalized list of
         {collection_id, title, slug, design_count, is_default, design_ids}.
 
-        The tab endpoint embeds only the FIRST page of each collection's
-        designs (~100 ids), so collections with designCnt beyond that get
-        their id list completed via the favorites/{cid}/designs pager —
-        otherwise the UI's "✓ all downloaded" could never trigger for big
-        collections (downloaded_count could never reach design_count).
+        The listlite endpoint returns the full collection list but embeds
+        NO designs and NO slugs, so this method enriches each collection:
+        the design-id list comes from the favorites/{cid}/designs pager
+        (without it the UI's "✓ all downloaded" could never trigger for
+        big collections — downloaded_count could never reach
+        design_count) and the slug via favorites/{cid}/withoutdesign.
         Capped at max_designs_per_collection per collection so one
         10,000-model collection can't turn into a crawl; a partial list
         still shows correct n/m checkmarks for the ids we do have. A small
         delay between paging requests keeps the anti-abuse layer (418) calm.
         """
-        out: list[dict[str, Any]] = []
-        offset = 0
-        while True:
-            data = await self.get_my_collections_page(limit=page_size, offset=offset)
-            hits = data.get("hits") or []
-            for hit in hits:
-                design_ids: list[int] = []
-                for d in hit.get("designs") or []:
-                    try:
-                        design_ids.append(int(d.get("id") or 0))
-                    except (TypeError, ValueError):
-                        continue
-                design_ids = [i for i in design_ids if i]
+        data = await self.get_my_collections_page(limit=page_size)
+        hits = data.get("hits") or []
+        if not hits:
+            return []
 
-                collection_id = int(hit.get("id") or 0)
-                design_count = int(hit.get("designCnt") or 0)
-                # Top up short lists from the collection's own pager (skip
-                # when the embedded page already covers everything, or when
-                # the cap can't change the outcome).
-                if (
-                    collection_id
-                    and design_count > len(design_ids)
-                    and len(design_ids) < max_designs_per_collection
-                ):
-                    try:
-                        extra = await self._collect_design_ids(
-                            collection_id,
-                            known=set(design_ids),
-                            cap=max_designs_per_collection,
-                        )
-                        design_ids.extend(extra)
-                    except MakerWorldError as e:
-                        # Keep the collection with partial ids rather than
-                        # failing the whole listing over one paging hiccup.
-                        logger.warning(
-                            "design list top-up for collection %s failed: %s",
-                            collection_id,
-                            e,
-                        )
-                out.append(
-                    {
-                        "collection_id": collection_id,
-                        "title": str(hit.get("title") or ""),
-                        "slug": str(hit.get("slug") or ""),
-                        "design_count": design_count,
-                        "is_default": bool(hit.get("isDefault")),
-                        "design_ids": design_ids,
-                    }
-                )
-            offset += len(hits)
-            total = int(data.get("total") or 0)
-            if not hits or offset >= total:
-                break
+        # Slugs need one extra request per collection — collect the ids
+        # first so _slug_map can pace them politely.
+        collection_ids = [int(h.get("id") or 0) for h in hits]
+        collection_ids = [c for c in collection_ids if c]
+        slugs = await self._slug_map(collection_ids)
+
+        out: list[dict[str, Any]] = []
+        for hit in hits:
+            collection_id = int(hit.get("id") or 0)
+            design_count = int(hit.get("designCnt") or 0)
+            design_ids: list[int] = []
+            if collection_id and design_count > 0 and max_designs_per_collection > 0:
+                try:
+                    design_ids = await self._collect_design_ids(
+                        collection_id,
+                        known=set(),
+                        cap=min(design_count, max_designs_per_collection),
+                    )
+                except MakerWorldError as e:
+                    # Keep the collection with no ids rather than failing
+                    # the whole listing over one paging hiccup.
+                    logger.warning(
+                        "design list for collection %s failed: %s",
+                        collection_id,
+                        e,
+                    )
+            out.append(
+                {
+                    "collection_id": collection_id,
+                    "title": str(hit.get("title") or ""),
+                    "slug": slugs.get(collection_id, ""),
+                    "design_count": design_count,
+                    "is_default": bool(hit.get("isDefault")),
+                    "design_ids": design_ids,
+                }
+            )
         return [c for c in out if c["collection_id"]]
 
     async def _collect_design_ids(
@@ -621,12 +649,13 @@ class MakerWorldClient:
         known: set[int],
         cap: int,
     ) -> list[int]:
-        """Page through favorites/{cid}/designs collecting NEW design ids.
+        """Page through favorites/{cid}/designs collecting design ids.
 
-        Used to complete the embedded page-1 id list for larger collections.
-        Stops at `cap` ids total, when the server reports fewer total items,
-        on an empty page, or at the CAP_MAX_PAGES guard (belt against a
-        pathological endless pagination). Politeness delay between pages.
+        listlite carries no designs, so this pager IS the id source for
+        every collection. Stops at `cap` ids total, when the server reports
+        fewer total items, on an empty page, or at the CAP_MAX_PAGES guard
+        (belt against a pathological endless pagination). Politeness delay
+        between pages.
         """
         extra: list[int] = []
         fetched = 0

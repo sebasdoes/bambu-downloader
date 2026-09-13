@@ -234,44 +234,41 @@ async def test_mw_get_text_plain_json_parsed():
 
 
 @pytest.mark.asyncio
-async def test_list_my_collections_walks_pagination():
-    """Two pages of collections; second page empty-ish termination."""
+async def test_list_my_collections_enriches_and_walks():
+    """listlite listing + per-collection enrichment (slug + design ids).
+
+    listlite (the verified personal-collections endpoint) returns all
+    collections at once with NO slug and NO designs; both come from
+    per-collection calls (withoutdesign / designs pager).
+    """
 
     def handler(request: httpx.Request) -> httpx.Response:
-        offset = int(request.url.params["offset"])
-        if offset == 0:
+        path = request.url.path
+        if path.endswith("/my/favorites/listlite"):
             return httpx.Response(
                 200,
                 json={
                     "total": 2,
+                    "default": {"id": 2, "title": "B"},
                     "hits": [
-                        {
-                            "id": 1,
-                            "title": "A",
-                            "slug": "a",
-                            "designCnt": 2,
-                            "isDefault": False,
-                            "designs": [{"id": 11}, {"id": 12}],
-                        }
+                        {"id": 1, "title": "A", "designCnt": 2, "isDefault": False},
+                        {"id": 2, "title": "B", "designCnt": 1, "isDefault": True},
                     ],
                 },
             )
-        return httpx.Response(
-            200,
-            json={
-                "total": 2,
-                "hits": [
-                    {
-                        "id": 2,
-                        "title": "B",
-                        "slug": "b",
-                        "designCnt": 1,
-                        "isDefault": True,
-                        "designs": [{"id": 13}],
-                    }
-                ],
-            },
-        )
+        if path.endswith("/favorites/1/withoutdesign"):
+            return httpx.Response(200, json={"title": "A", "slug": "a"})
+        if path.endswith("/favorites/2/withoutdesign"):
+            return httpx.Response(200, json={"title": "B", "slug": "b"})
+        if path.endswith("/favorites/1/designs"):
+            offset = int(request.url.params["offset"])
+            pages = {0: [{"id": 11}, {"id": 12}], 2: []}
+            return httpx.Response(200, json={"total": 2, "hits": pages[offset]})
+        if path.endswith("/favorites/2/designs"):
+            offset = int(request.url.params["offset"])
+            pages = {0: [{"id": 13}]}
+            return httpx.Response(200, json={"total": 1, "hits": pages[offset]})
+        return httpx.Response(404)
 
     client = _client_with_transport(handler)
     try:
@@ -294,6 +291,79 @@ async def test_list_my_collections_walks_pagination():
                 "design_ids": [13],
             },
         ]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_my_collections_survives_enrichment_failure():
+    """A failing slug/ids lookup for one collection keeps the listing alive
+    (title still shown, slug empty, design ids missing) — partial data beats
+    losing the whole listing."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/my/favorites/listlite"):
+            return httpx.Response(
+                200,
+                json={
+                    "total": 1,
+                    "hits": [
+                        {"id": 1, "title": "A", "designCnt": 5000, "isDefault": False}
+                    ],
+                },
+            )
+        return httpx.Response(500)
+
+    client = _client_with_transport(handler)
+    try:
+        mine = await client.list_my_collections()
+        assert mine == [
+            {
+                "collection_id": 1,
+                "title": "A",
+                "slug": "",
+                "design_count": 5000,
+                "is_default": False,
+                "design_ids": [],
+            }
+        ]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_list_my_collections_design_cap():
+    """design_ids are capped at max_designs_per_collection (5000-model
+    collection with cap 1000 must not page forever)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/my/favorites/listlite"):
+            return httpx.Response(
+                200,
+                json={
+                    "total": 1,
+                    "hits": [
+                        {"id": 1, "title": "A", "designCnt": 5000, "isDefault": False}
+                    ],
+                },
+            )
+        if path.endswith("/favorites/1/withoutdesign"):
+            return httpx.Response(200, json={"title": "A", "slug": "a"})
+        if path.endswith("/favorites/1/designs"):
+            offset = int(request.url.params["offset"])
+            # 10+ pages of 100 designs each; total 5000 so only cap/loop-guard stops it
+            ids = [{"id": 1000 + offset + i} for i in range(100)]
+            return httpx.Response(200, json={"total": 5000, "hits": ids})
+        return httpx.Response(404)
+
+    client = _client_with_transport(handler)
+    try:
+        mine = await client.list_my_collections(max_designs_per_collection=1000)
+        ids = mine[0]["design_ids"]
+        assert len(ids) == 1000
+        assert mine[0]["slug"] == "a"
     finally:
         await client.close()
 
@@ -406,8 +476,8 @@ async def test_download_file_cdn_path_uses_httpx_stream():
 
 
 def test_cap_constants_cover_max_design_cap():
-    """Pager ceiling must cover the 1000-design cap (embedded ~100 + pages)."""
-    assert mw.CAP_MAX_PAGES * mw.CAP_PAGE_SIZE >= 1000 - 100
+    """Pager ceiling must cover the 1000-design cap (pages of up to 64)."""
+    assert mw.CAP_MAX_PAGES * mw.CAP_PAGE_SIZE >= 1000
 
 
 @pytest.mark.asyncio

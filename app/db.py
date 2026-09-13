@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS collections (
 );
 
 -- Snapshot of the signed-in user's own MakerWorld collections, cached from
--- the favorites-collections/tab endpoint by refresh_my_collections(). This
+-- the my/favorites/listlite endpoint by refresh_my_collections(). This
 -- is a cache only: rows are never deleted (a collection that vanishes on
 -- MakerWorld is marked hidden instead) and following a collection still
 -- writes to `collections`.

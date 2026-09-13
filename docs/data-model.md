@@ -132,10 +132,11 @@ plate, dedup per design+plate).
 ### `remote_collections` — own-collection cache
 
 A **cache only**, rewritten wholesale by `refresh_my_collections()` from the
-`favorites-collections/tab` endpoint:
+`my/favorites/listlite` endpoint:
 
-- `design_ids` is a JSON array of ints; page-1 embedded ids are topped up from
-  the per-collection pager (capped: 100/page, `CAP_MAX_PAGES = 10`).
+- `design_ids` is a JSON array of ints, filled from the per-collection pager
+  (capped: 100/page, `CAP_MAX_PAGES = 10`); slugs come from one extra
+  `withoutdesign` request per collection.
 - Rows are never deleted — a collection that vanishes on MakerWorld just
   disappears from the cache view; nothing here touches `collections`.
 - Read paths compute download checkmarks at query time by chunked `IN (...)`
