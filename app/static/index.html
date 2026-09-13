@@ -16,16 +16,16 @@
   * { box-sizing: border-box; }
   body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); }
   a { color: var(--green); }
-  header { position: sticky; top: 0; z-index: 10; background: rgba(15,18,20,.92); backdrop-filter: blur(8px); border-bottom: 1px solid var(--border); padding: 0.75rem 1rem; display: flex; align-items: center; gap: 0.75rem; }
-  header h1 { font-size: 1.1rem; margin: 0; display: flex; align-items: center; gap: 0.5rem; }
-  header .logo { width: 26px; height: 26px; border-radius: 7px; background: var(--green); display: inline-flex; align-items: center; justify-content: center; font-weight: 800; color: #04130a; font-size: 14px; }
+  header { position: sticky; top: 0; z-index: 10; background: rgba(15,18,20,.92); backdrop-filter: blur(8px); border-bottom: 1px solid var(--border); padding: 0.75rem 1rem; display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
+  header h1 { font-size: 1.1rem; margin: 0; display: flex; align-items: center; gap: 0.5rem; white-space: nowrap; min-width: 0; }
+  header .logo { width: 26px; height: 26px; border-radius: 7px; background: var(--green); display: inline-flex; align-items: center; justify-content: center; font-weight: 800; color: #04130a; font-size: 14px; flex-shrink: 0; }
   header .spacer { flex: 1; }
-  .auth-badge { font-size: 0.78rem; padding: 0.25rem 0.6rem; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); cursor: pointer; background: none; }
+  .auth-badge { font-size: 0.78rem; padding: 0.25rem 0.6rem; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); cursor: pointer; background: none; min-width: 0; max-width: 62vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .auth-badge.on { color: var(--green); border-color: var(--green-dim); }
   .auth-badge.off { color: var(--yellow); border-color: var(--yellow); }
   main { max-width: 980px; margin: 0 auto; padding: 1rem; }
-  nav.tabs { display: flex; gap: 0.25rem; margin-bottom: 1.25rem; background: var(--panel); border: 1px solid var(--border); padding: 0.3rem; border-radius: var(--radius); }
-  nav.tabs button { flex: 1; padding: 0.55rem 0.5rem; border: none; border-radius: 8px; background: none; color: var(--muted); font-size: 0.9rem; cursor: pointer; }
+  nav.tabs { display: flex; gap: 0.25rem; margin-bottom: 1.25rem; background: var(--panel); border: 1px solid var(--border); padding: 0.3rem; border-radius: var(--radius); flex-wrap: wrap; }
+  nav.tabs button { flex: 1 1 auto; padding: 0.55rem 0.5rem; border: none; border-radius: 8px; background: none; color: var(--muted); font-size: 0.9rem; cursor: pointer; white-space: nowrap; min-width: 0; }
   nav.tabs button.active { background: var(--panel2); color: var(--text); box-shadow: inset 0 0 0 1px var(--border); }
   .card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem; margin-bottom: 1rem; }
   .card h2 { margin: 0 0 0.75rem; font-size: 1rem; display: flex; align-items: center; gap: 0.5rem; }
@@ -41,6 +41,9 @@
   button.ghost:hover { border-color: var(--green-dim); }
   button.danger { padding: 0.45rem 0.8rem; border-radius: 8px; border: 1px solid #5c2626; background: none; color: var(--red); cursor: pointer; font-size: 0.85rem; }
   .muted { color: var(--muted); font-size: 0.85rem; }
+  /* Long unbroken tokens (emails, paths, filenames) must wrap, not force the
+     page wider than the viewport — that overflowed the header on mobile. */
+  .event, .model-card .sub, .coll-item, .hint { overflow-wrap: anywhere; }
   .hint { color: var(--muted); font-size: 0.8rem; margin: 0.4rem 0 0; }
   .toast-wrap { position: fixed; bottom: 1rem; left: 50%; transform: translateX(-50%); z-index: 100; display: flex; flex-direction: column; gap: 0.5rem; width: min(92vw, 480px); }
   .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 90; display: flex; align-items: center; justify-content: center; padding: 1rem; }
@@ -85,7 +88,17 @@
   .login-steps .step { width: 28px; height: 28px; border-radius: 50%; background: var(--panel2); border: 1px solid var(--border); display: inline-flex; align-items: center; justify-content: center; font-size: 0.8rem; color: var(--muted); }
   .login-steps .step.on { background: var(--green); color: #04130a; border-color: var(--green); font-weight: 700; }
   .empty { text-align: center; color: var(--muted); padding: 2rem 0; }
-  @media (max-width: 600px) { main { padding: 0.6rem; } nav.tabs button { font-size: 0.8rem; } }
+  @media (max-width: 600px) {
+    main { padding: 0.6rem; }
+    /* 3-per-row tab bar on phones: five emoji labels don't fit one row at
+       default mobile zoom — wrapping beats overflowing. */
+    nav.tabs button { flex: 1 1 30%; font-size: 0.8rem; }
+    header { padding: 0.6rem 0.7rem; gap: 0.5rem; }
+    header h1 { font-size: 1rem; }
+    .auth-badge { max-width: 52vw; }
+    .card { padding: 0.8rem; }
+    .coll-item input[type=number] { width: 74px; min-width: 74px; }
+  }
 </style>
 </head>
 <body>
