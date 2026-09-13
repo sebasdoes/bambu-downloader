@@ -1,0 +1,38 @@
+name: Tests
+
+# Runs the offline pytest suite (tests/). All tests use temp databases and
+# mocked HTTP — no secrets or network access needed. The container-image
+# workflow depends on this one: a red test run blocks the image build.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      # Runtime deps come from requirements.txt (the app itself);
+      # pytest tooling from requirements-dev.txt.
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run pytest
+        run: python -m pytest tests/ -v --tb=short
