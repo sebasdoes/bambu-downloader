@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import sqlite3
 
-import pytest
-
 from app.db import Database, utcnow
 
 
 # ---------------------------------------------------------------- schema
 def test_schema_created(db: Database):
     conn = sqlite3.connect(db.db_path)
-    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    tables = {
+        r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
     conn.close()
     assert {"meta", "models", "collections", "remote_collections"} <= tables
 
@@ -46,16 +46,28 @@ def test_meta_roundtrip(db: Database):
 # ---------------------------------------------------------------- models
 def _insert(db: Database, design_id: int, profile_id=None, **kw):
     defaults = dict(
-        title=f"m{design_id}", slug="s", url="u",
-        filename=f"{design_id}.3mf", file_path=f"/x/{design_id}.3mf", file_size=1,
+        title=f"m{design_id}",
+        slug="s",
+        url="u",
+        filename=f"{design_id}.3mf",
+        file_path=f"/x/{design_id}.3mf",
+        file_size=1,
     )
     defaults.update(kw)
     return db.insert_model(design_id=design_id, profile_id=profile_id, **defaults)
 
 
 def test_insert_model_and_dedup(db: Database):
-    db.insert_model(design_id=1, profile_id=None, title="A", slug="a", url="u",
-                    filename="a.3mf", file_path="/x/a.3mf", file_size=1)
+    db.insert_model(
+        design_id=1,
+        profile_id=None,
+        title="A",
+        slug="a",
+        url="u",
+        filename="a.3mf",
+        file_path="/x/a.3mf",
+        file_size=1,
+    )
     assert db.model_exists_any(1)
     assert db.model_exists(1, None)
     assert not db.model_exists(1, 5)
@@ -82,16 +94,26 @@ def test_insert_model_upsert_keeps_backfilled_metadata(db: Database):
     status. That's intentional: the first download's snapshot is stable.
     """
     _insert(db, 1, cover_url="https://c/1", collection_title="Coll", creator="Zed")
-    db.insert_model(design_id=1, profile_id=None, title="A2", slug="a", url="u",
-                    filename="a.3mf", file_path="/y/a.3mf", file_size=9,
-                    cover_url=None, collection_title=None, creator=None)
+    db.insert_model(
+        design_id=1,
+        profile_id=None,
+        title="A2",
+        slug="a",
+        url="u",
+        filename="a.3mf",
+        file_path="/y/a.3mf",
+        file_size=9,
+        cover_url=None,
+        collection_title=None,
+        creator=None,
+    )
     rows = db.list_models()
     assert len(rows) == 1
     row = rows[0]
-    assert row["title"] == "m1"                  # preserved (not in SET clause)
-    assert row["file_path"] == "/y/a.3mf"        # overwritten fields
+    assert row["title"] == "m1"  # preserved (not in SET clause)
+    assert row["file_path"] == "/y/a.3mf"  # overwritten fields
     assert row["file_size"] == 9
-    assert row["cover_url"] == "https://c/1"     # COALESCE-protected
+    assert row["cover_url"] == "https://c/1"  # COALESCE-protected
     assert row["collection_title"] == "Coll"
     assert row["creator"] == "Zed"
 
@@ -99,9 +121,18 @@ def test_insert_model_upsert_keeps_backfilled_metadata(db: Database):
 def test_insert_model_fills_null_metadata_on_conflict(db: Database):
     """A re-download WITH metadata fills in what the first row lacked."""
     _insert(db, 1)
-    db.insert_model(design_id=1, profile_id=None, title="A", slug="a", url="u",
-                    filename="a.3mf", file_path="/x/a.3mf", file_size=1,
-                    cover_url="https://c/1", creator="Zed")
+    db.insert_model(
+        design_id=1,
+        profile_id=None,
+        title="A",
+        slug="a",
+        url="u",
+        filename="a.3mf",
+        file_path="/x/a.3mf",
+        file_size=1,
+        cover_url="https://c/1",
+        creator="Zed",
+    )
     row = db.list_models()[0]
     assert row["cover_url"] == "https://c/1"
     assert row["creator"] == "Zed"
@@ -109,8 +140,12 @@ def test_insert_model_fills_null_metadata_on_conflict(db: Database):
 
 def test_list_models_filters_and_pagination(db: Database):
     for did in range(10):
-        _insert(db, did, collection_id=42 if did % 2 == 0 else None,
-                collection_title="Even" if did % 2 == 0 else None)
+        _insert(
+            db,
+            did,
+            collection_id=42 if did % 2 == 0 else None,
+            collection_title="Even" if did % 2 == 0 else None,
+        )
     assert db.count_models() == 10
     assert db.count_models(collection_id=42) == 5
     assert db.count_models(no_collection=True) == 5
@@ -120,10 +155,12 @@ def test_list_models_filters_and_pagination(db: Database):
     ids2 = {m["design_id"] for m in p2}
     assert not ids1 & ids2
     assert p1[0]["created_at"] >= p2[0]["created_at"]  # newest first
-    labels = {l["label"] for l in db.model_labels()}
+    labels = {lbl["label"] for lbl in db.model_labels()}
     assert "Even" in labels
-    assert any(l["label"] == "Manual download" and l["collection_id"] is None
-               for l in db.model_labels())
+    assert any(
+        lbl["label"] == "Manual download" and lbl["collection_id"] is None
+        for lbl in db.model_labels()
+    )
 
 
 def test_update_model_status(db: Database):
@@ -150,8 +187,9 @@ def test_models_missing_meta_criteria(db: Database, tmp_path):
     dl_dir = tmp_path / "dl4"
     dl_dir.mkdir()
     (dl_dir / "cover.webp").write_bytes(b"webp")
-    _insert(db, 4, cover_url="https://c/4", creator="Zed",
-            file_path=str(dl_dir / "4.3mf"))
+    _insert(
+        db, 4, cover_url="https://c/4", creator="Zed", file_path=str(dl_dir / "4.3mf")
+    )
     missing = {r["design_id"] for r in db.models_missing_meta()}
     assert missing == {1, 2, 3}
 
@@ -228,27 +266,33 @@ def test_delete_models_only_target_collection(db: Database):
 # ------------------------------------------------- remote collections cache
 def _rc(cid, count, ids, is_default=False):
     return {
-        "collection_id": cid, "title": f"T{cid}", "slug": f"t{cid}",
-        "design_count": count, "is_default": is_default, "design_ids": ids,
+        "collection_id": cid,
+        "title": f"T{cid}",
+        "slug": f"t{cid}",
+        "design_count": count,
+        "is_default": is_default,
+        "design_ids": ids,
     }
 
 
 def test_remote_collections_replace_and_annotate(db: Database):
     _insert(db, 11)  # design 11 downloaded
     _insert(db, 13)
-    db.replace_remote_collections([
-        _rc(1, 3, [11, 12, 13]),
-        _rc(2, 2, [14, 15]),
-        _rc(3, 0, []),
-    ])
+    db.replace_remote_collections(
+        [
+            _rc(1, 3, [11, 12, 13]),
+            _rc(2, 2, [14, 15]),
+            _rc(3, 0, []),
+        ]
+    )
     rows = db.remote_collections()
     by_id = {r["collection_id"]: r for r in rows}
-    assert by_id[1]["checked_ids"] == [11, 13]     # in collection order
+    assert by_id[1]["checked_ids"] == [11, 13]  # in collection order
     assert by_id[1]["downloaded_count"] == 2
-    assert by_id[1]["downloaded"] is False          # 2/3
+    assert by_id[1]["downloaded"] is False  # 2/3
     assert by_id[2]["downloaded_count"] == 0
     assert by_id[2]["checked_ids"] == []
-    assert by_id[3]["downloaded"] is False          # empty collection isn't "done"
+    assert by_id[3]["downloaded"] is False  # empty collection isn't "done"
     assert by_id[3]["design_ids"] == []
     assert db.remote_collections_fetched_at() is not None
 

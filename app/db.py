@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 DB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -49,6 +50,7 @@ CREATE TABLE IF NOT EXISTS collections (
     url TEXT NOT NULL,
     sync_interval_minutes INTEGER NOT NULL DEFAULT 360,
     enabled INTEGER NOT NULL DEFAULT 1,
+    plates_mode TEXT NOT NULL DEFAULT 'default',
     last_sync_at TEXT,
     last_sync_status TEXT,
     last_sync_new INTEGER DEFAULT 0,
@@ -118,6 +120,7 @@ class Database:
                 "ALTER TABLE models ADD COLUMN cover_url TEXT",
                 "ALTER TABLE models ADD COLUMN collection_title TEXT",
                 "ALTER TABLE models ADD COLUMN creator TEXT",
+                "ALTER TABLE collections ADD COLUMN plates_mode TEXT NOT NULL DEFAULT 'default'",
                 # Hot-path indexes (no-op when they exist). cover: looked up
                 # by every /thumb request; created_at: list_models' default
                 # sort; collection_id: the label/collection filters.
@@ -170,7 +173,9 @@ class Database:
     def get_meta(self, key: str) -> str | None:
         """Read a metadata value (e.g. bambu_token); None if unset."""
         with self.connect() as conn:
-            row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+            row = conn.execute(
+                "SELECT value FROM meta WHERE key = ?", (key,)
+            ).fetchone()
             return row["value"] if row else None
 
     def set_meta(self, key: str, value: str) -> None:
@@ -213,6 +218,37 @@ class Database:
                 "SELECT 1 FROM models WHERE design_id = ?", (design_id,)
             ).fetchone()
             return row is not None
+
+    def design_plates(self, design_id: int) -> list[int | None]:
+        """Which plates of this design are already in the library.
+
+        None represents a plate-less/default row. Used by the 'all plates'
+        sync mode to know which plate fragments to still fetch.
+        """
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT profile_id FROM models WHERE design_id = ?", (design_id,)
+            ).fetchall()
+            return [r["profile_id"] for r in rows]
+
+    def design_fully_pinned(
+        self, design_id: int, known_plates: list[int] | None = None
+    ) -> bool:
+        """Is every plate of this design already downloaded?
+
+        Without an explicit plate list this is only decidable against the
+        design's OWN stored rows: with 'all-plates' syncs the caller passes
+        the plates it just enumerated so a partially-downloaded multi-plate
+        design re-syncs the missing ones.
+        """
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT COUNT(*) AS c FROM models WHERE design_id = ?", (design_id,)
+            ).fetchone()
+            stored = rows["c"]
+        if known_plates is None:
+            return False  # unknown plate list — assume more may exist
+        return stored >= len(set(known_plates))
 
     def insert_model(
         self,
@@ -273,7 +309,9 @@ class Database:
             )
             return cur.lastrowid or 0
 
-    def update_model_status(self, model_row_id: int, status: str, error: str | None = None) -> None:
+    def update_model_status(
+        self, model_row_id: int, status: str, error: str | None = None
+    ) -> None:
         """Update a model row's status/error (e.g. mark a failed download)."""
         with self.connect() as conn:
             conn.execute(
@@ -292,7 +330,9 @@ class Database:
         Used with mark_meta_scan() so a boot after a clean scan checks just
         the new/changed rows instead of re-statting the whole library.
         """
-        query = "SELECT design_id, profile_id, file_path, cover_url, creator FROM models"
+        query = (
+            "SELECT design_id, profile_id, file_path, cover_url, creator FROM models"
+        )
         params: list[Any] = []
         if since:
             query += " WHERE updated_at > ?"
@@ -390,8 +430,10 @@ class Database:
     ) -> list[dict[str, Any]]:
         """List model rows (newest first) with the given origin filters."""
         where_sql, params = self._model_filters(collection_id, no_collection, label)
-        query = f"SELECT * FROM models{where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?"
-        params = params + [limit, offset]
+        query = (
+            f"SELECT * FROM models{where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        )
+        params = [*params, limit, offset]
         with self.connect() as conn:
             return [dict(r) for r in conn.execute(query, params).fetchall()]
 
@@ -423,18 +465,28 @@ class Database:
         for r in rows:
             if r["collection_id"] is None:
                 labels.append(
-                    {"label": MANUAL_DOWNLOAD_LABEL, "count": r["n"], "collection_id": None}
+                    {
+                        "label": MANUAL_DOWNLOAD_LABEL,
+                        "count": r["n"],
+                        "collection_id": None,
+                    }
                 )
             else:
                 name = r["collection_title"] or f"Collection #{r['collection_id']}"
                 labels.append(
-                    {"label": name, "count": r["n"], "collection_id": r["collection_id"]}
+                    {
+                        "label": name,
+                        "count": r["n"],
+                        "collection_id": r["collection_id"],
+                    }
                 )
         labels.sort(key=lambda x: -x["count"])
         return labels
 
     # ---- collections ----
-    def upsert_collection(self, collection_id: int, title: str, url: str, interval: int) -> int:
+    def upsert_collection(
+        self, collection_id: int, title: str, url: str, interval: int
+    ) -> int:
         """Register or refresh a followed collection; returns the row id."""
         now = utcnow()
         with self.connect() as conn:
@@ -453,7 +505,12 @@ class Database:
     def list_collections(self) -> list[dict[str, Any]]:
         """All followed collections, newest first."""
         with self.connect() as conn:
-            return [dict(r) for r in conn.execute("SELECT * FROM collections ORDER BY created_at DESC").fetchall()]
+            return [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT * FROM collections ORDER BY created_at DESC"
+                ).fetchall()
+            ]
 
     def get_collection(self, collection_id: int) -> dict[str, Any] | None:
         """Fetch one followed collection, or None if not registered."""
@@ -479,6 +536,17 @@ class Database:
                 (minutes, collection_id),
             )
 
+    def set_collection_plates_mode(self, collection_id: int, mode: str) -> None:
+        """Set a collection's plate-download mode: 'default' (first plate of
+        each design) or 'all' (every plate, deduped per design+plate)."""
+        if mode not in ("default", "all"):
+            raise ValueError(f"Invalid plates mode: {mode!r}")
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE collections SET plates_mode = ? WHERE collection_id = ?",
+                (mode, collection_id),
+            )
+
     def record_sync(self, collection_id: int, status: str, new_count: int) -> None:
         """Stamp a collection with the outcome of a sync run.
 
@@ -495,13 +563,17 @@ class Database:
     def delete_collection(self, collection_id: int) -> None:
         """Unfollow a collection (model rows are kept; see delete_models)."""
         with self.connect() as conn:
-            conn.execute("DELETE FROM collections WHERE collection_id = ?", (collection_id,))
+            conn.execute(
+                "DELETE FROM collections WHERE collection_id = ?", (collection_id,)
+            )
 
     def delete_models(self, collection_id: int) -> int:
         """Remove all library rows belonging to a collection (used by unfollow
         with file deletion). Returns the number of rows removed."""
         with self.connect() as conn:
-            cur = conn.execute("DELETE FROM models WHERE collection_id = ?", (collection_id,))
+            cur = conn.execute(
+                "DELETE FROM models WHERE collection_id = ?", (collection_id,)
+            )
             return cur.rowcount or 0
 
     def due_collections(self, now_iso: str) -> list[dict[str, Any]]:
@@ -579,7 +651,7 @@ class Database:
             downloaded: set[int] = set()
             ordered = sorted(all_ids)
             for chunk_start in range(0, len(ordered), 500):
-                chunk = ordered[chunk_start:chunk_start + 500]
+                chunk = ordered[chunk_start : chunk_start + 500]
                 qmarks = ",".join("?" * len(chunk))
                 for d in conn.execute(
                     f"SELECT DISTINCT design_id FROM models WHERE design_id IN ({qmarks})",
@@ -604,5 +676,7 @@ class Database:
     def remote_collections_fetched_at(self) -> str | None:
         """When the cache was last refreshed (None = never)."""
         with self.connect() as conn:
-            row = conn.execute("SELECT MAX(fetched_at) AS t FROM remote_collections").fetchone()
+            row = conn.execute(
+                "SELECT MAX(fetched_at) AS t FROM remote_collections"
+            ).fetchone()
             return row["t"] if row else None

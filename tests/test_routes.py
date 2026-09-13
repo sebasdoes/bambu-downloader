@@ -33,6 +33,7 @@ def app_wired(tmp_env, monkeypatch):
     for mod in (config_mod, db_mod, dl_mod, mw_mod, routes_mod, sched_mod):
         importlib.reload(mod)
     import app.main as main_mod
+
     importlib.reload(main_mod)
 
     import os
@@ -77,8 +78,16 @@ def test_status_shape(app_wired):
     resp = client.get("/api/status")
     body = resp.json()
     assert resp.status_code == 200
-    for key in ("authenticated", "email", "token_invalid", "region",
-                "download_dir", "model_count", "collection_count", "scheduler"):
+    for key in (
+        "authenticated",
+        "email",
+        "token_invalid",
+        "region",
+        "download_dir",
+        "model_count",
+        "collection_count",
+        "scheduler",
+    ):
         assert key in body
     assert body["authenticated"] is False
     assert body["model_count"] == 0
@@ -88,10 +97,18 @@ def test_status_shape(app_wired):
 def test_models_listing_and_filters(app_wired):
     client, db, _ = app_wired
     for did, cid in [(1, None), (2, 10), (3, 10)]:
-        db.insert_model(design_id=did, profile_id=None, title=f"m{did}", slug="s",
-                        url="u", filename=f"{did}.3mf", file_path=f"/x/{did}.3mf",
-                        file_size=1, collection_id=cid,
-                        collection_title=f"C{cid}" if cid else None)
+        db.insert_model(
+            design_id=did,
+            profile_id=None,
+            title=f"m{did}",
+            slug="s",
+            url="u",
+            filename=f"{did}.3mf",
+            file_path=f"/x/{did}.3mf",
+            file_size=1,
+            collection_id=cid,
+            collection_title=f"C{cid}" if cid else None,
+        )
     resp = client.get("/api/models")
     body = resp.json()
     assert body["total"] == 3
@@ -109,7 +126,7 @@ def test_models_listing_and_filters(app_wired):
     assert resp.json()["total"] == 3
     # labels endpoint
     resp = client.get("/api/model-labels")
-    labels = {l["label"] for l in resp.json()}
+    labels = {lbl["label"] for lbl in resp.json()}
     assert "C10" in labels
     assert "Manual download" in labels
 
@@ -134,16 +151,30 @@ def test_my_collections_requires_token_for_refresh(app_wired):
 def test_my_collections_refresh_and_read(app_wired, monkeypatch):
     client, db, manager = app_wired
     db.set_meta("bambu_token", "tok")
-    db.insert_model(design_id=11, profile_id=None, title="x", slug="x", url="u",
-                    filename="x.3mf", file_path="/x/x.3mf", file_size=1)
-
-    import asyncio
+    db.insert_model(
+        design_id=11,
+        profile_id=None,
+        title="x",
+        slug="x",
+        url="u",
+        filename="x.3mf",
+        file_path="/x/x.3mf",
+        file_size=1,
+    )
 
     async def fake_refresh(self):
-        db.replace_remote_collections([
-            {"collection_id": 1, "title": "A", "slug": "a", "design_count": 2,
-             "is_default": False, "design_ids": [11, 12]},
-        ])
+        db.replace_remote_collections(
+            [
+                {
+                    "collection_id": 1,
+                    "title": "A",
+                    "slug": "a",
+                    "design_count": 2,
+                    "is_default": False,
+                    "design_ids": [11, 12],
+                },
+            ]
+        )
         return {"collections": 1, "fetched_at": db.remote_collections_fetched_at()}
 
     monkeypatch.setattr(type(manager), "refresh_my_collections", fake_refresh)
@@ -186,6 +217,7 @@ def test_download_endpoint_maps_errors(app_wired, monkeypatch):
     def make(kind):
         async def _dl(self, url, collection_id=None, subfolder=None):
             raise kind
+
         return _dl
 
     cases = [
@@ -197,7 +229,9 @@ def test_download_endpoint_maps_errors(app_wired, monkeypatch):
     ]
     for err, code in cases:
         monkeypatch.setattr(type(manager), "download_model", make(err))
-        resp = client.post("/api/download", json={"url": "https://makerworld.com/en/models/1"})
+        resp = client.post(
+            "/api/download", json={"url": "https://makerworld.com/en/models/1"}
+        )
         assert resp.status_code == code, (err, resp.status_code)
 
 
@@ -210,9 +244,13 @@ def test_download_success_and_exists(app_wired, monkeypatch):
         return {"status": "exists"}
 
     monkeypatch.setattr(type(manager), "download_model", fake_download)
-    resp = client.post("/api/download", json={"url": "https://makerworld.com/en/models/1"})
+    resp = client.post(
+        "/api/download", json={"url": "https://makerworld.com/en/models/1"}
+    )
     assert resp.json()["status"] == "downloaded"
-    resp = client.post("/api/download", json={"url": "https://makerworld.com/en/models/2"})
+    resp = client.post(
+        "/api/download", json={"url": "https://makerworld.com/en/models/2"}
+    )
     assert resp.json()["status"] == "exists"
 
 
@@ -225,7 +263,9 @@ def test_download_requires_url(app_wired):
 # -------------------------------------------------------------- collections
 def test_add_collection_validates_url(app_wired):
     client, db, _ = app_wired
-    resp = client.post("/api/collections", json={"url": "https://makerworld.com/en/models/1"})
+    resp = client.post(
+        "/api/collections", json={"url": "https://makerworld.com/en/models/1"}
+    )
     assert resp.status_code == 400
 
 
@@ -245,8 +285,9 @@ def test_add_collection_private_hint(app_wired, monkeypatch):
     # get_client (pooled) is what add_collection actually uses now
     monkeypatch.setattr("app.routes.get_client", lambda **kw: FakeClient())
     db.set_meta("bambu_token", "tok")
-    resp = client.post("/api/collections",
-                       json={"url": "https://makerworld.com/en/collections/123-c"})
+    resp = client.post(
+        "/api/collections", json={"url": "https://makerworld.com/en/collections/123-c"}
+    )
     assert resp.status_code == 403
     assert "private" in resp.json()["detail"].lower()
 
@@ -254,7 +295,9 @@ def test_add_collection_private_hint(app_wired, monkeypatch):
 def test_collection_patch_and_delete(app_wired):
     client, db, _ = app_wired
     db.upsert_collection(1, "C", "u", 60)
-    resp = client.patch("/api/collections/1", json={"enabled": False, "sync_interval_minutes": 30})
+    resp = client.patch(
+        "/api/collections/1", json={"enabled": False, "sync_interval_minutes": 30}
+    )
     body = resp.json()
     assert body["enabled"] == 0
     assert body["sync_interval_minutes"] == 30
@@ -300,7 +343,9 @@ def test_sync_now_starts_background_task(app_wired, monkeypatch):
 # ------------------------------------------------------------- shared model
 def test_shared_model_validation(app_wired):
     client, db, _ = app_wired
-    ok = client.get("/api/shared-model", params={"url": "https://makerworld.com/en/models/5-x"})
+    ok = client.get(
+        "/api/shared-model", params={"url": "https://makerworld.com/en/models/5-x"}
+    )
     assert ok.json() == {"valid": True, "url": "https://makerworld.com/en/models/5-x"}
     bad = client.get("/api/shared-model", params={"url": "https://example.com/nope"})
     assert bad.json()["valid"] is False

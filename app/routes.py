@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
 from .config import settings
-from .db import Database, utcnow
+from .db import Database
 from .downloader import DownloadManager, recent_events
 from .makerworld import (
     AuthRequiredError,
@@ -29,7 +29,9 @@ from .makerworld import (
 from .scheduler import SyncScheduler, trigger_sync
 
 
-async def require_api_key(x_api_key: str | None = Header(default=None, alias="X-API-Key")) -> None:
+async def require_api_key(
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> None:
     """Gate every /api/* route behind the configured shared secret (if any).
 
     Compares with hmac.compare_digest to avoid timing leaks. When no key is
@@ -38,7 +40,9 @@ async def require_api_key(x_api_key: str | None = Header(default=None, alias="X-
     if not settings.api_key:
         return
     if not x_api_key or not hmac.compare_digest(x_api_key, settings.api_key):
-        raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key header")
+        raise HTTPException(
+            status_code=401, detail="Invalid or missing X-API-Key header"
+        )
 
 
 router = APIRouter(prefix="/api", dependencies=[Depends(require_api_key)])
@@ -103,10 +107,11 @@ class CollectionAddRequest(BaseModel):
 
 
 class CollectionUpdateRequest(BaseModel):
-    """Body for PATCH /api/collections/{id}: interval and/or enabled flag."""
+    """Body for PATCH /api/collections/{id}: interval, enabled, plates mode."""
 
     sync_interval_minutes: int | None = None
     enabled: bool | None = None
+    plates_mode: str | None = None  # 'default' | 'all'
 
 
 # ------------------------------------------------------------------ status
@@ -128,7 +133,12 @@ def _remember_token_state(token: str, valid: bool) -> None:
 
 
 async def _token_state() -> bool | None:
-    """True/False cached; None = unknown (never treat as signed-out)."""
+    """True/False cached; None = unknown (never treat as signed-out).
+
+    On an explicit rejection, first tries one silent refresh with the
+    stored refresh token (downloader.try_token_refresh): if the session is
+    renewed the answer is True and the UI never flashes "expired".
+    """
     token = db.get_meta("bambu_token")
     if not token:
         return None
@@ -140,6 +150,12 @@ async def _token_state() -> bool | None:
         valid = await client.validate_token(token)
     finally:
         await release_client(client)
+    if (
+        valid is False
+        and db.get_meta("bambu_token_refresh")
+        and await manager.try_token_refresh()
+    ):
+        return True
     if valid is not None:
         _remember_token_state(token, valid)
     return valid
@@ -165,6 +181,7 @@ async def status() -> dict[str, Any]:
         "model_count": db.count_models(),
         "collection_count": len(db.list_collections()),
         "scheduler": scheduler.status(),
+        "downloads": manager.queue_status(),
     }
 
 
@@ -183,7 +200,7 @@ async def login(req: LoginRequest) -> dict[str, Any]:
     try:
         result = await client.login(req.email, req.password)
     except MakerWorldError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     finally:
         await release_client(client)
     if result["step"] == "done":
@@ -214,7 +231,7 @@ async def verify(req: VerifyRequest) -> dict[str, Any]:
         else:
             result = await client.verify_email_code(req.email, req.code)
     except MakerWorldError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     finally:
         await release_client(client)
     if result["step"] != "done" or not result.get("access_token"):
@@ -282,15 +299,15 @@ async def download(req: DownloadRequest) -> dict[str, Any]:
     try:
         result = await manager.download_model(req.url)
     except AuthRequiredError as e:
-        raise HTTPException(status_code=401, detail=str(e))
+        raise HTTPException(status_code=401, detail=str(e)) from e
     except NotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from e
     except ForbiddenError as e:
-        raise HTTPException(status_code=403, detail=str(e))
+        raise HTTPException(status_code=403, detail=str(e)) from e
     except CaptchaError as e:
-        raise HTTPException(status_code=429, detail=str(e))
+        raise HTTPException(status_code=429, detail=str(e)) from e
     except MakerWorldError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     return result
 
 
@@ -300,7 +317,7 @@ async def resolve(req: DownloadRequest) -> dict[str, Any]:
     try:
         return await manager.resolve_design(req.url)
     except MakerWorldError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @router.get("/models")
@@ -365,7 +382,9 @@ async def my_collections() -> dict[str, Any]:
     for row in rows:
         row["followed"] = row["collection_id"] in followed
         row["sync_interval_minutes"] = (
-            followed[row["collection_id"]]["sync_interval_minutes"] if row["followed"] else None
+            followed[row["collection_id"]]["sync_interval_minutes"]
+            if row["followed"]
+            else None
         )
     return {
         "collections": rows,
@@ -387,11 +406,11 @@ async def refresh_my_collections_now() -> dict[str, Any]:
     try:
         result = await manager.refresh_my_collections()
     except AuthRequiredError as e:
-        raise HTTPException(status_code=401, detail=str(e))
+        raise HTTPException(status_code=401, detail=str(e)) from e
     except CaptchaError as e:
-        raise HTTPException(status_code=429, detail=str(e))
+        raise HTTPException(status_code=429, detail=str(e)) from e
     except MakerWorldError as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        raise HTTPException(status_code=502, detail=str(e)) from e
     return result
 
 
@@ -406,7 +425,7 @@ async def add_collection(req: CollectionAddRequest) -> dict[str, Any]:
     try:
         collection_id = parse_collection_url(req.url)
     except MakerWorldError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     # Fetch metadata to validate the collection and get its title. Attach the
     # stored token so the user's OWN PRIVATE collections resolve — anonymous
     # requests get 403 on private collections.
@@ -416,15 +435,17 @@ async def add_collection(req: CollectionAddRequest) -> dict[str, Any]:
     try:
         info = await client.get_collection_info(collection_id)
     except NotFoundError:
-        raise HTTPException(status_code=404, detail="Collection not found on MakerWorld")
+        raise HTTPException(
+            status_code=404, detail="Collection not found on MakerWorld"
+        ) from None
     except ForbiddenError:
         raise HTTPException(
             status_code=403,
             detail="No access rights to this collection. Sign in first — private "
             "collections need the owner's (or a collaborator's) account.",
-        )
+        ) from None
     except MakerWorldError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     finally:
         await release_client(client)
     title = str(info.get("title") or f"collection-{collection_id}")
@@ -433,10 +454,23 @@ async def add_collection(req: CollectionAddRequest) -> dict[str, Any]:
 
 
 @router.patch("/collections/{collection_id}")
-async def update_collection(collection_id: int, req: CollectionUpdateRequest) -> dict[str, Any]:
-    """Update a followed collection's sync interval and/or paused state."""
+async def update_collection(
+    collection_id: int, req: CollectionUpdateRequest
+) -> dict[str, Any]:
+    """Update a followed collection's interval, paused state, or plates mode.
+
+    plates_mode 'default' downloads the first plate of each design; 'all'
+    enumerates every plate per design and downloads missing ones (deduped
+    per design+plate). Invalid modes are rejected client-side too, but a
+    400 here keeps the API honest.
+    """
     if not db.get_collection(collection_id):
         raise HTTPException(status_code=404, detail="Collection not registered")
+    if req.plates_mode is not None:
+        try:
+            db.set_collection_plates_mode(collection_id, req.plates_mode)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
     if req.sync_interval_minutes is not None:
         db.set_collection_interval(collection_id, req.sync_interval_minutes)
     if req.enabled is not None:
@@ -445,7 +479,9 @@ async def update_collection(collection_id: int, req: CollectionUpdateRequest) ->
 
 
 @router.delete("/collections/{collection_id}")
-async def delete_collection(collection_id: int, delete_files: bool = False) -> dict[str, Any]:
+async def delete_collection(
+    collection_id: int, delete_files: bool = False
+) -> dict[str, Any]:
     """Unfollow a collection. With delete_files=true, also remove its
     downloaded model files (and their cover.webp + now-empty folders) and
     the matching library rows.

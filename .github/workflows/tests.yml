@@ -1,8 +1,9 @@
 name: Tests
 
-# Runs the offline pytest suite (tests/). All tests use temp databases and
-# mocked HTTP — no secrets or network access needed. The container-image
-# workflow depends on this one: a red test run blocks the image build.
+# Runs the offline pytest suite (tests/) plus ruff lint and format checks.
+# All tests use temp databases and mocked HTTP — no secrets or network
+# access needed. The container-image workflow depends on this one: a red
+# test run blocks the image build.
 on:
   push:
     branches: [main]
@@ -36,3 +37,25 @@ jobs:
 
       - name: Run pytest
         run: python -m pytest tests/ -v --tb=short
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # Ruff is a single static binary — a pinned pip install is the
+      # simplest reliable route; no cache needed for one small wheel.
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Ruff lint (ruff check)
+        run: ruff check app/ tests/
+
+      - name: Ruff format check
+        run: ruff format app/ tests/ --check

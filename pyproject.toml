@@ -1,0 +1,40 @@
+# Ruff configuration: lint + format checks for CI and local use.
+# Selected rules favor correctness over style dogma; line length matches
+# the codebase's ~100-char norm.
+
+# Match the app's target (python:3.13-slim image). Must be top-level or
+# under [lint] — ruff 0.16 reads it as a top-level setting.
+target-version = "py313"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes (unused imports, undefined names)
+    "W",   # pycodestyle warnings
+    "I",   # import sorting
+    "B",   # bugbear (common bug patterns)
+    "UP",  # pyupgrade (modern syntax)
+    "SIM", # simplification
+    "C4",  # comprehensions
+    "RUF", # ruff-specific
+]
+ignore = [
+    "E501",   # line length: the codebase favors long descriptive lines
+    "SIM105", # contextlib.suppress vs try/except — try/except is clearer here
+    "ASYNC230", # blocking open() in _download_s3_verbatim: intentional (runs
+              # in a worker thread via to_thread; urllib needs a real file)
+    "RUF059", # unpacked-but-unused variables (test fixtures use `db` etc.
+              # for setup side effects; renaming to _db everywhere hurts
+              # readability more than the lint helps)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B011", "SIM117", "B017", "C408"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "tests"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"

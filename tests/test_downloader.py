@@ -6,13 +6,15 @@ network is involved.
 
 from __future__ import annotations
 
-import asyncio
-from pathlib import Path
-
 import pytest
 
-import app.downloader as dl
-from app.downloader import DownloadManager, _safe_filename, _slugify, recent_events, add_event
+from app.downloader import (
+    DownloadManager,
+    _safe_filename,
+    _slugify,
+    add_event,
+    recent_events,
+)
 from app.makerworld import AuthRequiredError
 
 
@@ -22,7 +24,7 @@ def test_safe_filename():
     # every bad char maps to exactly one underscore (1:1, not collapsed):
     # / \ : * ? each become '_' — len is preserved
     assert _safe_filename(r"bad/name\with:chars*?.3mf") == "bad_name_with_chars__.3mf"
-    assert _safe_filename(".hidden") == "model_.hidden"      # no dotfiles
+    assert _safe_filename(".hidden") == "model_.hidden"  # no dotfiles
     long = "a" * 500 + ".3mf"
     assert len(_safe_filename(long)) <= 150
 
@@ -30,7 +32,9 @@ def test_safe_filename():
 def test_slugify():
     assert _slugify("Hello World!") == "hello-world"
     assert _slugify("  multi   spaces  ") == "multi-spaces"
-    assert _slugify("ünïcode_ñame") == "nme" or _slugify("ünïcode_ñame")  # non-ascii stripped
+    assert _slugify("ünïcode_ñame") == "nme" or _slugify(
+        "ünïcode_ñame"
+    )  # non-ascii stripped
     assert len(_slugify("x" * 200)) <= 80
     assert _slugify("") == "untitled"
 
@@ -54,10 +58,17 @@ async def test_add_event_ring_buffer():
 @pytest.mark.asyncio
 async def test_download_model_exists_short_circuit(db):
     manager = DownloadManager(db)
-    from app.db import Database
 
-    db.insert_model(design_id=77, profile_id=None, title="T", slug="t", url="u",
-                    filename="t.3mf", file_path="/x/t.3mf", file_size=1)
+    db.insert_model(
+        design_id=77,
+        profile_id=None,
+        title="T",
+        slug="t",
+        url="u",
+        filename="t.3mf",
+        file_path="/x/t.3mf",
+        file_size=1,
+    )
     # plate-less URL: design-level dedup
     result = await manager.download_model("https://makerworld.com/en/models/77")
     assert result["status"] == "exists"
@@ -70,17 +81,35 @@ async def test_download_model_exists_short_circuit(db):
 @pytest.mark.asyncio
 async def test_download_model_exact_profile_dedup(db):
     manager = DownloadManager(db)
-    db.insert_model(design_id=77, profile_id=5, title="T", slug="t", url="u",
-                    filename="t.3mf", file_path="/x/t.3mf", file_size=1)
-    result = await manager.download_model("https://makerworld.com/en/models/77#profileId-5")
+    db.insert_model(
+        design_id=77,
+        profile_id=5,
+        title="T",
+        slug="t",
+        url="u",
+        filename="t.3mf",
+        file_path="/x/t.3mf",
+        file_size=1,
+    )
+    result = await manager.download_model(
+        "https://makerworld.com/en/models/77#profileId-5"
+    )
     assert result["status"] == "exists"
 
 
 @pytest.mark.asyncio
 async def test_resolve_design_reports_already_downloaded(db):
     manager = DownloadManager(db)
-    db.insert_model(design_id=88, profile_id=None, title="T", slug="t", url="u",
-                    filename="t.3mf", file_path="/x/t.3mf", file_size=1)
+    db.insert_model(
+        design_id=88,
+        profile_id=None,
+        title="T",
+        slug="t",
+        url="u",
+        filename="t.3mf",
+        file_path="/x/t.3mf",
+        file_size=1,
+    )
 
     class FakeClient:
         async def get_design(self, design_id):
@@ -113,11 +142,19 @@ async def test_refresh_my_collections_caches_listing(db):
     db.set_meta("bambu_token", "tok")
 
     class FakeClient:
-        async def list_my_collections(self, page_size=50, max_designs_per_collection=1000):
-            return [{
-                "collection_id": 1, "title": "A", "slug": "a",
-                "design_count": 2, "is_default": False, "design_ids": [11, 12],
-            }]
+        async def list_my_collections(
+            self, page_size=50, max_designs_per_collection=1000
+        ):
+            return [
+                {
+                    "collection_id": 1,
+                    "title": "A",
+                    "slug": "a",
+                    "design_count": 2,
+                    "is_default": False,
+                    "design_ids": [11, 12],
+                }
+            ]
 
         async def close(self):
             return None
@@ -170,8 +207,16 @@ async def test_sync_collection_skips_downloaded(db, monkeypatch):
     """Designs already in the library are skipped without download attempts."""
     manager = DownloadManager(db)
     db.upsert_collection(1, "Cats", "u", 60)
-    db.insert_model(design_id=500, profile_id=None, title="X", slug="x", url="u",
-                    filename="x.3mf", file_path="/x/x.3mf", file_size=1)
+    db.insert_model(
+        design_id=500,
+        profile_id=None,
+        title="X",
+        slug="x",
+        url="u",
+        filename="x.3mf",
+        file_path="/x/x.3mf",
+        file_size=1,
+    )
 
     class FakeClient:
         async def get_collection_info(self, collection_id):
@@ -222,10 +267,23 @@ async def test_backfill_watermark_flow(db, monkeypatch):
     manager = DownloadManager(db)
     db.mark_meta_scan(clean=True)
     manager._client = lambda: _FullFakeClient()
-    monkeypatch.setattr(manager.db, "models_missing_meta",
-                        lambda since=None: [{"design_id": 1, "profile_id": None,
-                                             "file_path": "/x/1.3mf", "cover_url": None,
-                                             "creator": None}] if since else [])
+    monkeypatch.setattr(
+        manager.db,
+        "models_missing_meta",
+        lambda since=None: (
+            [
+                {
+                    "design_id": 1,
+                    "profile_id": None,
+                    "file_path": "/x/1.3mf",
+                    "cover_url": None,
+                    "creator": None,
+                }
+            ]
+            if since
+            else []
+        ),
+    )
     await manager.backfill_metadata()
     # watermark cleared because the incremental pass found work
     scan_at, clean = db.meta_scan_state()

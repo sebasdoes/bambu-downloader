@@ -34,7 +34,9 @@ class SyncScheduler:
         """Launch the polling loop (a no-op if it's already running)."""
         if self._task is None or self._task.done():
             self._running = True
-            self._task = asyncio.get_running_loop().create_task(self._loop(), name="sync-scheduler")
+            self._task = asyncio.get_running_loop().create_task(
+                self._loop(), name="sync-scheduler"
+            )
 
     async def stop(self) -> None:
         """Cancel the scheduler and any manual sync in flight (graceful shutdown)."""
@@ -70,7 +72,9 @@ class SyncScheduler:
         fetched_at = self.db.remote_collections_fetched_at()
         if fetched_at:
             try:
-                age = (datetime.now(timezone.utc) - datetime.fromisoformat(fetched_at)).total_seconds()
+                age = (
+                    datetime.now(timezone.utc) - datetime.fromisoformat(fetched_at)
+                ).total_seconds()
                 self._next_mine_refresh = time.monotonic() + max(0.0, refresh_ms - age)
             except (ValueError, TypeError):
                 self._next_mine_refresh = 0.0
@@ -80,7 +84,9 @@ class SyncScheduler:
             try:
                 if time.monotonic() >= self._next_mine_refresh:
                     await self._refresh_my_collections()
-                    self._next_mine_refresh = time.monotonic() + settings.my_collections_refresh_minutes * 60
+                    self._next_mine_refresh = (
+                        time.monotonic() + settings.my_collections_refresh_minutes * 60
+                    )
                 due = self.db.due_collections(utcnow())
                 for coll in due:
                     cid = coll["collection_id"]
@@ -92,14 +98,30 @@ class SyncScheduler:
                     try:
                         await self.manager.sync_collection(cid)
                     except AuthRequiredError:
-                        # Shouldn't normally happen (sync_collection handles it
-                        # internally), but keep the safety net for listing-stage
-                        # auth failures (before any download attempt).
-                        await add_event("error", f"Collection {cid} sync skipped — not signed in to MakerWorld")
+                        # Listing-stage auth failure (before any download
+                        # attempt) — try one silent token refresh, then
+                        # retry the sync once. Otherwise record the abort.
+                        if await self.manager.try_token_refresh():
+                            try:
+                                await self.manager.sync_collection(cid)
+                            except MakerWorldError as e:
+                                await add_event(
+                                    "error",
+                                    f"Collection {cid} sync failed after token refresh — {e}",
+                                )
+                                self.db.record_sync(cid, "error", 0)
+                            continue  # refresh worked: move on regardless
+                        await add_event(
+                            "error",
+                            f"Collection {cid} sync skipped — not signed in to MakerWorld",
+                        )
                         self.db.record_sync(cid, "auth-required", 0)
                     except CaptchaError:
                         # Same: safety net for listing-stage challenges.
-                        await add_event("error", f"Collection {cid} sync skipped — rate-limited (CAPTCHA)")
+                        await add_event(
+                            "error",
+                            f"Collection {cid} sync skipped — rate-limited (CAPTCHA)",
+                        )
                         self.db.record_sync(cid, "captcha", 0)
                     except asyncio.CancelledError:
                         self.active.pop(cid, None)
@@ -144,7 +166,8 @@ class SyncScheduler:
             "checked_at": datetime.now(timezone.utc).isoformat(),
             "next_my_collections_refresh": (
                 max(0.0, self._next_mine_refresh - time.monotonic())
-                if self._running else None
+                if self._running
+                else None
             ),
         }
 
@@ -172,7 +195,11 @@ def trigger_sync(manager: DownloadManager, collection_id: int) -> bool:
         try:
             await manager.sync_collection(collection_id)
         except MakerWorldError as e:
-            await add_event("error", f"Manual sync of collection {collection_id} failed — {e}")
+            await add_event(
+                "error", f"Manual sync of collection {collection_id} failed — {e}"
+            )
 
-    _manual_tasks[collection_id] = asyncio.get_running_loop().create_task(run(), name=f"sync-{collection_id}")
+    _manual_tasks[collection_id] = asyncio.get_running_loop().create_task(
+        run(), name=f"sync-{collection_id}"
+    )
     return True

@@ -21,9 +21,9 @@ COVER_URL = "https://makerworld.bblmw.com/makerworld/model/TEST/design/cover.jpg
 @pytest.fixture()
 def thumb_env(tmp_env, monkeypatch):
     """App wired with one model whose cover.webp exists on disk."""
-    import app.main as main_mod
     import app.db as db_mod
     import app.downloader as dl_mod
+    import app.main as main_mod
     import app.makerworld as mw_mod
     import app.routes as routes_mod
     import app.scheduler as sched_mod
@@ -42,11 +42,21 @@ def thumb_env(tmp_env, monkeypatch):
     dl_root.mkdir(parents=True, exist_ok=True)
     (dl_root / "cover.webp").write_bytes(PNG_1PX)
     database.insert_model(
-        design_id=999, profile_id=None, title="T", slug="t", url="u",
-        filename="t.3mf", file_path=str(dl_root / "t.3mf"), file_size=1,
+        design_id=999,
+        profile_id=None,
+        title="T",
+        slug="t",
+        url="u",
+        filename="t.3mf",
+        file_path=str(dl_root / "t.3mf"),
+        file_size=1,
         cover_url=COVER_URL,
     )
-    routes_mod.init(database, DownloadManager(database), SyncScheduler(database, DownloadManager(database)))
+    routes_mod.init(
+        database,
+        DownloadManager(database),
+        SyncScheduler(database, DownloadManager(database)),
+    )
 
     from app.main import app
 
@@ -68,8 +78,9 @@ def test_thumb_304_on_matching_etag(thumb_env):
     client, db, _ = thumb_env
     first = client.get("/thumb", params={"url": COVER_URL})
     etag = first.headers["etag"]
-    reval = client.get("/thumb", params={"url": COVER_URL},
-                       headers={"If-None-Match": etag})
+    reval = client.get(
+        "/thumb", params={"url": COVER_URL}, headers={"If-None-Match": etag}
+    )
     assert reval.status_code == 304
     assert reval.content == b""
     assert reval.headers["etag"] == etag
@@ -77,8 +88,9 @@ def test_thumb_304_on_matching_etag(thumb_env):
 
 def test_thumb_200_on_mismatched_etag(thumb_env):
     client, db, _ = thumb_env
-    resp = client.get("/thumb", params={"url": COVER_URL},
-                      headers={"If-None-Match": '"stale"'})
+    resp = client.get(
+        "/thumb", params={"url": COVER_URL}, headers={"If-None-Match": '"stale"'}
+    )
     assert resp.status_code == 200
     assert resp.content == PNG_1PX
 
@@ -87,8 +99,11 @@ def test_thumb_304_list_header(thumb_env):
     """If-None-Match may carry multiple candidates (comma-separated)."""
     client, db, _ = thumb_env
     etag = client.get("/thumb", params={"url": COVER_URL}).headers["etag"]
-    resp = client.get("/thumb", params={"url": COVER_URL},
-                      headers={"If-None-Match": f'"other", {etag}'})
+    resp = client.get(
+        "/thumb",
+        params={"url": COVER_URL},
+        headers={"If-None-Match": f'"other", {etag}'},
+    )
     assert resp.status_code == 304
 
 
@@ -134,8 +149,11 @@ def test_thumb_clamps_width(thumb_env, monkeypatch):
 # ------------------------------------------------------------- static shell
 def test_shell_cache_headers(thumb_env):
     client, _, _ = thumb_env
-    for path, must_cache in [("/", False), ("/sw.js", False),
-                             ("/manifest.webmanifest", None)]:
+    for path, must_cache in [
+        ("/", False),
+        ("/sw.js", False),
+        ("/manifest.webmanifest", None),
+    ]:
         resp = client.get(path)
         assert resp.status_code == 200
         cc = resp.headers.get("cache-control", "")

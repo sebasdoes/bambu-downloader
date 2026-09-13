@@ -3,25 +3,22 @@
 Network is never touched: HTTP behavior is tested with a mock transport
 (httpx.MockTransport) wired through a real MakerWorldClient, so _mw_get's
 error translation and download_host selection are covered end to end.
+
+NOTE on exception identity: other test files reload app.makerworld (their
+fixtures need fresh settings), which rebinds the module's exception
+classes. This module therefore resolves exceptions through `mw` (the live
+module) at call time instead of binding them at import time.
 """
 
 from __future__ import annotations
-
-import json
-import urllib.error
 
 import httpx
 import pytest
 
 import app.makerworld as mw
+from app.downloader import _find_url
 from app.makerworld import (
-    AuthExpiredError,
-    AuthRequiredError,
-    CaptchaError,
-    ForbiddenError,
-    MakerWorldClient,
-    MakerWorldError,
-    NotFoundError,
+    MakerWorldClient,  # class object is stable enough for construction
     _detect_captcha,
     _filename_from_response,
     _safe_json,
@@ -31,12 +28,20 @@ from app.makerworld import (
     parse_model_url,
     release_client,
 )
-from app.downloader import _find_url, _safe_filename
+
+
+# Resolve exception classes lazily so reloads in other test files don't
+# strand stale class objects here.
+def _exc(name: str):
+    return getattr(mw, name)
 
 
 # ---------------------------------------------------------------- URL parsing
 def test_parse_model_url_plain():
-    assert parse_model_url("https://makerworld.com/en/models/1234567-slug") == (1234567, None)
+    assert parse_model_url("https://makerworld.com/en/models/1234567-slug") == (
+        1234567,
+        None,
+    )
 
 
 def test_parse_model_url_with_profile():
@@ -45,7 +50,7 @@ def test_parse_model_url_with_profile():
 
 
 def test_parse_model_url_rejects_non_model():
-    with pytest.raises(MakerWorldError):
+    with __import__("pytest").raises(_exc("MakerWorldError")):
         parse_model_url("https://makerworld.com/en/collections/1-x")
 
 
@@ -54,7 +59,7 @@ def test_parse_collection_url():
 
 
 def test_parse_collection_url_rejects_model():
-    with pytest.raises(MakerWorldError):
+    with __import__("pytest").raises(_exc("MakerWorldError")):
         parse_collection_url("https://makerworld.com/en/models/1-x")
 
 
@@ -80,13 +85,17 @@ def test_detect_captcha_textual():
 def test_find_url_known_keys_and_recursion():
     assert _find_url({"url": "https://a"}) == "https://a"
     assert _find_url({"downloadUrl": "https://b"}) == "https://b"
-    assert _find_url({"a": {"b": [{"c": {"download_url": "https://d"}}]}}) == "https://d"
+    assert (
+        _find_url({"a": {"b": [{"c": {"download_url": "https://d"}}]}}) == "https://d"
+    )
     assert _find_url({"url": "not-http"}) is None
     assert _find_url(42) is None
 
 
 def test_filename_from_response_prefer_content_disposition():
-    resp = httpx.Response(200, headers={"content-disposition": 'attachment; filename="x.3mf"'})
+    resp = httpx.Response(
+        200, headers={"content-disposition": 'attachment; filename="x.3mf"'}
+    )
     assert _filename_from_response(resp, "https://a/b/y.3mf") == "x.3mf"
 
 
@@ -119,7 +128,7 @@ async def test_mw_get_401_maps_to_expired():
 
     client = _client_with_transport(handler)
     try:
-        with pytest.raises(AuthExpiredError):
+        with __import__("pytest").raises(_exc("AuthExpiredError")):
             await client._mw_get("/api/x")
     finally:
         await client.close()
@@ -132,7 +141,7 @@ async def test_mw_get_403_please_log_in_maps_to_auth_required():
 
     client = _client_with_transport(handler)
     try:
-        with pytest.raises(AuthRequiredError):
+        with __import__("pytest").raises(_exc("AuthRequiredError")):
             await client._mw_get("/api/x")
     finally:
         await client.close()
@@ -145,7 +154,7 @@ async def test_mw_get_403_other_maps_to_forbidden():
 
     client = _client_with_transport(handler)
     try:
-        with pytest.raises(ForbiddenError):
+        with __import__("pytest").raises(_exc("ForbiddenError")):
             await client._mw_get("/api/x")
     finally:
         await client.close()
@@ -158,7 +167,7 @@ async def test_mw_get_404_maps_to_not_found():
 
     client = _client_with_transport(handler)
     try:
-        with pytest.raises(NotFoundError):
+        with __import__("pytest").raises(_exc("NotFoundError")):
             await client._mw_get("/api/x")
     finally:
         await client.close()
@@ -171,7 +180,7 @@ async def test_mw_get_captcha_body_maps_to_captcha():
 
     client = _client_with_transport(handler)
     try:
-        with pytest.raises(CaptchaError):
+        with __import__("pytest").raises(_exc("CaptchaError")):
             await client._mw_get("/api/x")
     finally:
         await client.close()
@@ -181,7 +190,7 @@ async def test_mw_get_captcha_body_maps_to_captcha():
 async def test_mw_get_requires_token_when_auth_true():
     client = MakerWorldClient()  # no token
     try:
-        with pytest.raises(AuthRequiredError):
+        with __import__("pytest").raises(_exc("AuthRequiredError")):
             await client._mw_get("/api/x", auth=True)
     finally:
         await client.close()
@@ -207,10 +216,15 @@ async def test_mw_get_auth_header_attached():
 @pytest.mark.asyncio
 async def test_mw_get_text_plain_json_parsed():
     """Gateway sometimes labels JSON as text/plain — must parse leniently."""
+
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, content=b'{"ok": true}', headers={
-            "content-type": "text/plain",
-        })
+        return httpx.Response(
+            200,
+            content=b'{"ok": true}',
+            headers={
+                "content-type": "text/plain",
+            },
+        )
 
     client = _client_with_transport(handler)
     try:
@@ -222,34 +236,63 @@ async def test_mw_get_text_plain_json_parsed():
 @pytest.mark.asyncio
 async def test_list_my_collections_walks_pagination():
     """Two pages of collections; second page empty-ish termination."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         offset = int(request.url.params["offset"])
         if offset == 0:
-            return httpx.Response(200, json={
+            return httpx.Response(
+                200,
+                json={
+                    "total": 2,
+                    "hits": [
+                        {
+                            "id": 1,
+                            "title": "A",
+                            "slug": "a",
+                            "designCnt": 2,
+                            "isDefault": False,
+                            "designs": [{"id": 11}, {"id": 12}],
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
                 "total": 2,
-                "hits": [{
-                    "id": 1, "title": "A", "slug": "a", "designCnt": 2,
-                    "isDefault": False,
-                    "designs": [{"id": 11}, {"id": 12}],
-                }],
-            })
-        return httpx.Response(200, json={
-            "total": 2,
-            "hits": [{
-                "id": 2, "title": "B", "slug": "b", "designCnt": 1,
-                "isDefault": True,
-                "designs": [{"id": 13}],
-            }],
-        })
+                "hits": [
+                    {
+                        "id": 2,
+                        "title": "B",
+                        "slug": "b",
+                        "designCnt": 1,
+                        "isDefault": True,
+                        "designs": [{"id": 13}],
+                    }
+                ],
+            },
+        )
 
     client = _client_with_transport(handler)
     try:
         mine = await client.list_my_collections()
         assert mine == [
-            {"collection_id": 1, "title": "A", "slug": "a",
-             "design_count": 2, "is_default": False, "design_ids": [11, 12]},
-            {"collection_id": 2, "title": "B", "slug": "b",
-             "design_count": 1, "is_default": True, "design_ids": [13]},
+            {
+                "collection_id": 1,
+                "title": "A",
+                "slug": "a",
+                "design_count": 2,
+                "is_default": False,
+                "design_ids": [11, 12],
+            },
+            {
+                "collection_id": 2,
+                "title": "B",
+                "slug": "b",
+                "design_count": 1,
+                "is_default": True,
+                "design_ids": [13],
+            },
         ]
     finally:
         await client.close()
@@ -259,6 +302,7 @@ async def test_list_my_collections_walks_pagination():
 async def test_validate_token_tri_state():
     statuses = {"ok": 200, "expired": 401, "ambiguous": 503}
     for name, status in statuses.items():
+
         def handler(request: httpx.Request, status=status) -> httpx.Response:
             return httpx.Response(status)
 
@@ -335,19 +379,24 @@ async def test_download_file_routes_s3_to_verbatim():
 @pytest.mark.asyncio
 async def test_download_file_cdn_path_uses_httpx_stream():
     """CDN (non-S3) URLs go through the async httpx path."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         assert "Authorization" not in request.headers  # signed URL IS the credential
         return httpx.Response(
-            200, content=b"12345678",
+            200,
+            content=b"12345678",
             headers={"content-disposition": 'attachment; filename="m.3mf"'},
         )
 
     client = MakerWorldClient()
     client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     from pathlib import Path
+
     dest = Path("/tmp/bnd_test_cdn.3mf")
     try:
-        size, name = await client.download_file("https://makerworld.bblmw.com/x/m", dest)
+        size, name = await client.download_file(
+            "https://makerworld.bblmw.com/x/m", dest
+        )
         assert size == 8
         assert name == "m.3mf"
         assert dest.read_bytes() == b"12345678"
@@ -364,6 +413,7 @@ def test_cap_constants_cover_max_design_cap():
 @pytest.mark.asyncio
 async def test_collect_design_ids_paging_and_cap(monkeypatch):
     """_collect_design_ids walks pages, dedups known ids, respects cap."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         offset = int(request.url.params["offset"])
         # 10+ pages of 100 designs each; total 5000 so only cap/loop-guard stops it

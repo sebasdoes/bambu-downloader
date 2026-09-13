@@ -113,6 +113,7 @@
 <body>
 <header>
   <h1><span class="logo">B</span> Bambu Downloader</h1>
+  <span class="tag ok" id="dlQueueBadge" hidden></span>
   <span class="spacer"></span>
   <button class="auth-badge off" id="authBadge" onclick="showTab('settings')">Not signed in</button>
 </header>
@@ -142,6 +143,10 @@
   <section id="tab-library" class="tab" hidden>
     <div class="card">
       <h2>📚 Downloaded models <span class="tag" id="libCount"></span></h2>
+      <div class="row" style="margin-bottom:0.6rem">
+        <input type="text" id="libSearch" placeholder="Search title, creator, filename…" oninput="applyLibSearch()">
+        <button class="ghost" onclick="document.getElementById('libSearch').value='';applyLibSearch()">Clear</button>
+      </div>
       <div class="chip-bar" id="labelChips"></div>
       <div class="model-grid" id="modelGrid"></div>
       <div style="text-align:center; margin-top:0.9rem">

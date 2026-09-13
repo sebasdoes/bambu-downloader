@@ -97,7 +97,9 @@ def parse_model_url(url: str) -> tuple[int, int | None]:
     """Extract (design_id, profile_id) from any MakerWorld model URL."""
     m = _MODEL_URL_RE.search(url)
     if not m:
-        raise MakerWorldError("Not a MakerWorld model URL (expected .../models/<id>-slug)")
+        raise MakerWorldError(
+            "Not a MakerWorld model URL (expected .../models/<id>-slug)"
+        )
     design_id = int(m.group(1))
     profile_id = None
     pm = _PROFILE_HASH_RE.search(url)
@@ -110,7 +112,9 @@ def parse_collection_url(url: str) -> int:
     """Extract collection_id from a MakerWorld collection URL."""
     m = _COLLECTION_URL_RE.search(url)
     if not m:
-        raise MakerWorldError("Not a MakerWorld collection URL (expected .../collections/<id>-slug)")
+        raise MakerWorldError(
+            "Not a MakerWorld collection URL (expected .../collections/<id>-slug)"
+        )
     return int(m.group(1))
 
 
@@ -143,7 +147,9 @@ class MakerWorldClient:
         """
         self.auth_token = auth_token
         self.region = region
-        base = settings.bambu_api_base if region != "china" else settings.bambu_api_base_cn
+        base = (
+            settings.bambu_api_base if region != "china" else settings.bambu_api_base_cn
+        )
         self.bambu_api = base.rstrip("/")
         self.mw = settings.makerworld_base.rstrip("/")
         self._client = httpx.AsyncClient(
@@ -188,7 +194,11 @@ class MakerWorldClient:
 
         data = _safe_json(resp)
         if resp.status_code != 200 or not isinstance(data, dict):
-            msg = data.get("error") or data.get("message") or "Login failed" if isinstance(data, dict) else "Login failed"
+            msg = (
+                data.get("error") or data.get("message") or "Login failed"
+                if isinstance(data, dict)
+                else "Login failed"
+            )
             raise MakerWorldError(str(msg))
 
         login_type = data.get("loginType")
@@ -218,18 +228,28 @@ class MakerWorldClient:
         except httpx.HTTPError as e:
             raise MakerWorldError(f"Could not reach Bambu Cloud: {e}") from e
         data = _safe_json(resp)
-        if resp.status_code == 200 and isinstance(data, dict) and data.get("accessToken"):
+        if (
+            resp.status_code == 200
+            and isinstance(data, dict)
+            and data.get("accessToken")
+        ):
             return {
                 "step": "done",
                 "access_token": data["accessToken"],
                 "refresh_token": data.get("refreshToken"),
             }
-        msg = data.get("message") or data.get("error") or "Verification failed" if isinstance(data, dict) else "Verification failed"
+        msg = (
+            data.get("message") or data.get("error") or "Verification failed"
+            if isinstance(data, dict)
+            else "Verification failed"
+        )
         raise MakerWorldError(str(msg))
 
     async def verify_totp(self, tfa_key: str, code: str) -> dict[str, Any]:
         """Complete login with a TOTP code. Uses the web origin + CSRF double submit."""
-        web_origin = "https://bambulab.cn" if self.region == "china" else "https://bambulab.com"
+        web_origin = (
+            "https://bambulab.cn" if self.region == "china" else "https://bambulab.com"
+        )
         csrf = await self._fetch_csrf_token(web_origin)
         if not csrf:
             raise MakerWorldError("Could not obtain a CSRF token from Bambu Cloud.")
@@ -256,8 +276,16 @@ class MakerWorldClient:
                 if self._client.cookies.get(name):
                     token = self._client.cookies.get(name)
                     break
-            return {"step": "done", "access_token": token, "refresh_token": data.get("refreshToken")}
-        msg = data.get("message") or data.get("error") or "Invalid code" if isinstance(data, dict) else "Invalid code"
+            return {
+                "step": "done",
+                "access_token": token,
+                "refresh_token": data.get("refreshToken"),
+            }
+        msg = (
+            data.get("message") or data.get("error") or "Invalid code"
+            if isinstance(data, dict)
+            else "Invalid code"
+        )
         raise MakerWorldError(str(msg))
 
     async def validate_token(self, token: str) -> bool | None:
@@ -284,6 +312,40 @@ class MakerWorldClient:
             return False
         return None
 
+    async def refresh_access_token(self, refresh_token: str) -> dict[str, Any] | None:
+        """Exchange a refresh token for a fresh access token.
+
+        POST {bambu_api}/v1/user-service/user/refresh with
+        {"refreshToken": ...} — the standard counterpart to the login
+        endpoint; Bambuddy uses the same flow. Returns
+        {"access_token", "refresh_token"} on success, or None when Bambu
+        rejects/ignores it (expired refresh token, unknown endpoint shape,
+        4xx) so callers keep today's "please sign in again" behavior.
+        Network failures also map to None: a blip must never log the user
+        out or wipe the stored refresh token.
+        """
+        if not refresh_token:
+            return None
+        try:
+            resp = await self._client.post(
+                f"{self.bambu_api}/v1/user-service/user/refresh",
+                json={"refreshToken": refresh_token},
+            )
+        except httpx.HTTPError:
+            return None
+        if resp.status_code != 200:
+            return None
+        data = _safe_json(resp)
+        if not isinstance(data, dict):
+            return None
+        token = data.get("accessToken")
+        if not (isinstance(token, str) and token.strip()):
+            return None
+        return {
+            "access_token": token,
+            "refresh_token": data.get("refreshToken") or refresh_token,
+        }
+
     # ----------------------------------------------------------- mw gateway
     async def _mw_get(
         self,
@@ -303,7 +365,9 @@ class MakerWorldClient:
         headers: dict[str, str] = {}
         if auth:
             if not self.auth_token:
-                raise AuthRequiredError("Sign in to MakerWorld first (Settings → Login).")
+                raise AuthRequiredError(
+                    "Sign in to MakerWorld first (Settings → Login)."
+                )
             headers["Authorization"] = f"Bearer {self.auth_token}"
         try:
             resp = await self._client.get(
@@ -318,12 +382,23 @@ class MakerWorldClient:
             raise CaptchaError("MakerWorld is challenging this network with a CAPTCHA.")
 
         if resp.status_code == 401:
-            raise AuthExpiredError("Your MakerWorld sign-in has expired. Sign in again.")
+            raise AuthExpiredError(
+                "Your MakerWorld sign-in has expired. Sign in again."
+            )
         if resp.status_code == 403:
             data = _safe_json(resp)
-            if isinstance(data, dict) and "please log in" in str(data.get("error", "")).lower():
-                raise AuthRequiredError("Sign in to MakerWorld first (Settings → Login).")
-            msg = data.get("error") or "Access denied" if isinstance(data, dict) else "Access denied"
+            if (
+                isinstance(data, dict)
+                and "please log in" in str(data.get("error", "")).lower()
+            ):
+                raise AuthRequiredError(
+                    "Sign in to MakerWorld first (Settings → Login)."
+                )
+            msg = (
+                data.get("error") or "Access denied"
+                if isinstance(data, dict)
+                else "Access denied"
+            )
             if self.auth_token:
                 # We DID send a token and were still refused — a truly private
                 # resource this account can't see.
@@ -335,13 +410,17 @@ class MakerWorldClient:
         if resp.status_code == 404:
             raise NotFoundError("MakerWorld resource not found (check the URL).")
         if resp.status_code != 200:
-            raise MakerWorldError(f"MakerWorld returned HTTP {resp.status_code} for {path}")
+            raise MakerWorldError(
+                f"MakerWorld returned HTTP {resp.status_code} for {path}"
+            )
 
         # The gateway sometimes returns JSON with content-type text/plain.
         try:
             return resp.json()
         except Exception as e:
-            raise MakerWorldError(f"Unexpected response from MakerWorld for {path}: {resp.text[:200]}") from e
+            raise MakerWorldError(
+                f"Unexpected response from MakerWorld for {path}: {resp.text[:200]}"
+            ) from e
 
     # ------------------------------------------------------------ public API
     async def get_design(self, design_id: int) -> dict[str, Any]:
@@ -368,13 +447,19 @@ class MakerWorldClient:
 
     async def get_design_model_download(self, design_id: int) -> dict[str, Any]:
         """Design-level download URL. Legacy path — newer models answer 400."""
-        return await self._mw_get(f"/api/v1/design-service/design/{design_id}/model", auth=True)
+        return await self._mw_get(
+            f"/api/v1/design-service/design/{design_id}/model", auth=True
+        )
 
     async def get_instance_download(self, instance_id: int) -> dict[str, Any]:
         """Per-plate 3MF URL. Legacy path — newer models answer 400."""
-        return await self._mw_get(f"/api/v1/design-service/instance/{instance_id}/f3mf", auth=True)
+        return await self._mw_get(
+            f"/api/v1/design-service/instance/{instance_id}/f3mf", auth=True
+        )
 
-    async def get_profile_download(self, profile_id: int, model_id: str) -> dict[str, Any]:
+    async def get_profile_download(
+        self, profile_id: int, model_id: str
+    ) -> dict[str, Any]:
         """Fetch the signed 3MF download manifest via Bambu's iot-service.
 
         GET {bambu_api}/v1/iot-service/api/user/profile/{profileId}?model_id={modelId}
@@ -409,7 +494,9 @@ class MakerWorldClient:
         if resp.status_code == 404:
             raise NotFoundError("Profile not found on Bambu Cloud.")
         if resp.status_code != 200:
-            raise MakerWorldError(f"Bambu Cloud returned HTTP {resp.status_code} for the download manifest")
+            raise MakerWorldError(
+                f"Bambu Cloud returned HTTP {resp.status_code} for the download manifest"
+            )
         data = _safe_json(resp)
         if isinstance(data, dict):
             return data
@@ -426,7 +513,9 @@ class MakerWorldClient:
             auth=bool(self.auth_token),
         )
 
-    async def get_collection_designs_page(self, collection_id: int, limit: int = 100, offset: int = 0) -> dict[str, Any]:
+    async def get_collection_designs_page(
+        self, collection_id: int, limit: int = 100, offset: int = 0
+    ) -> dict[str, Any]:
         """Collection design listing — same optional-auth treatment as above."""
         return await self._mw_get(
             f"/api/v1/design-service/favorites/{collection_id}/designs",
@@ -434,7 +523,9 @@ class MakerWorldClient:
             auth=bool(self.auth_token),
         )
 
-    async def get_my_collections_page(self, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+    async def get_my_collections_page(
+        self, limit: int = 50, offset: int = 0
+    ) -> dict[str, Any]:
         """One page of the signed-in user's own collections (auth required).
 
         GET /api/v1/design-service/favorites-collections/tab — verified live:
@@ -476,7 +567,7 @@ class MakerWorldClient:
             hits = data.get("hits") or []
             for hit in hits:
                 design_ids: list[int] = []
-                for d in (hit.get("designs") or []):
+                for d in hit.get("designs") or []:
                     try:
                         design_ids.append(int(d.get("id") or 0))
                     except (TypeError, ValueError):
@@ -505,7 +596,8 @@ class MakerWorldClient:
                         # failing the whole listing over one paging hiccup.
                         logger.warning(
                             "design list top-up for collection %s failed: %s",
-                            collection_id, e,
+                            collection_id,
+                            e,
                         )
                 out.append(
                     {
@@ -559,12 +651,16 @@ class MakerWorldClient:
                 break
         return extra
 
-    async def list_collection_designs(self, collection_id: int, page_size: int = 100) -> list[dict[str, Any]]:
+    async def list_collection_designs(
+        self, collection_id: int, page_size: int = 100
+    ) -> list[dict[str, Any]]:
         """Walk pagination and return all designs in a collection."""
         all_hits: list[dict[str, Any]] = []
         offset = 0
         while True:
-            data = await self.get_collection_designs_page(collection_id, limit=page_size, offset=offset)
+            data = await self.get_collection_designs_page(
+                collection_id, limit=page_size, offset=offset
+            )
             hits = data.get("hits") or []
             all_hits.extend(hits)
             total = int(data.get("total") or 0)
@@ -598,7 +694,9 @@ class MakerWorldClient:
                 "GET", url, headers={"User-Agent": settings.user_agent}
             ) as resp:
                 if resp.status_code != 200:
-                    raise MakerWorldError(f"Download failed with HTTP {resp.status_code}")
+                    raise MakerWorldError(
+                        f"Download failed with HTTP {resp.status_code}"
+                    )
                 size = 0
                 with open(dest_path, "wb") as f:
                     async for chunk in resp.aiter_bytes(65536):
@@ -623,7 +721,9 @@ class MakerWorldClient:
         try:
             with urllib.request.urlopen(req, timeout=120) as resp:
                 if resp.status != 200:
-                    raise MakerWorldError(f"Download failed with HTTP {resp.status_code}")
+                    raise MakerWorldError(
+                        f"Download failed with HTTP {resp.status_code}"
+                    )
                 size = 0
                 with open(dest_path, "wb") as f:
                     while True:
@@ -632,7 +732,9 @@ class MakerWorldClient:
                             break
                         size += len(chunk)
                         f.write(chunk)
-                filename = url.split("?")[0].rstrip("/").rsplit("/", 1)[-1] or "model.3mf"
+                filename = (
+                    url.split("?")[0].rstrip("/").rsplit("/", 1)[-1] or "model.3mf"
+                )
                 return size, filename
         except Exception as e:
             raise MakerWorldError(f"Download failed: {e}") from e
@@ -671,7 +773,9 @@ def _safe_json(resp: httpx.Response) -> Any:
 _client_pool: dict[tuple[str | None, str], MakerWorldClient] = {}
 
 
-def get_client(auth_token: str | None = None, region: str = "global") -> MakerWorldClient:
+def get_client(
+    auth_token: str | None = None, region: str = "global"
+) -> MakerWorldClient:
     """Return a long-lived pooled client for this (token, region) identity.
 
     Created on first use, reused after. Pooled clients must NOT be closed
@@ -710,7 +814,7 @@ async def invalidate_shared_clients() -> None:
     for client in pooled:
         try:
             await client.close()
-        except Exception:  # noqa: BLE001 — teardown must never raise
+        except Exception:
             logger.warning("error closing pooled MakerWorld client", exc_info=True)
 
 

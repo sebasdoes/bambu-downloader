@@ -85,6 +85,18 @@ async function loadStatus() {
     document.getElementById('sysInfo').textContent =
       `Downloads directory: ${s.download_dir} · ${s.model_count} models · ` +
       `${s.collection_count} collections · scheduler ${s.scheduler.running ? 'running' : 'stopped'}`;
+    // Download queue: queued/active items (Semaphore(2) can hold 2 active
+    // plus any number queued behind it during a sync).
+    const q = s.downloads || [];
+    const badge = document.getElementById('dlQueueBadge');
+    if (badge) {
+      const active = q.filter(d => d.state === 'active').length;
+      const queued = q.length - active;
+      badge.hidden = q.length === 0;
+      badge.textContent = q.length
+        ? `⬇ ${active ? active + ' active' : ''}${active && queued ? ' · ' : ''}${queued ? queued + ' queued' : ''}`
+        : '';
+    }
   } catch (e) {
     console.error('status failed', e);
   }
@@ -154,8 +166,11 @@ function modelCard(m) {
     : `<span class="tag origin" title="Downloaded by URL, not via a collection">🏷 Manual download</span>`;
   const creator = m.creator ? `by ${esc(m.creator)}` : '';
   const date = m.created_at ? new Date(m.created_at).toLocaleDateString() : '';
+  // Search haystack (lowercased once, here): title, creator, filename.
+  const hay = [m.title, m.creator, m.filename, m.collection_title]
+    .filter(Boolean).join(' ').toLowerCase();
   return `
-  <div class="model-card">
+  <div class="model-card" data-search="${esc(hay)}">
     <a class="cover" href="${esc(mwUrl)}" target="_blank" rel="noopener noreferrer" title="View on MakerWorld">${img}</a>
     <div class="meta title" title="${esc(m.title)}">${esc(m.title)}</div>
     <div class="meta sub">
@@ -173,6 +188,27 @@ function modelCard(m) {
   </div>`;
 }
 
+// Client-side library search: filters the cards that are already rendered
+// (loaded pages + Load-more). Server-side LIKE search can come later if the
+// library ever outgrows local memory — the data-search attribute carries the
+// haystack so this stays a pure DOM operation.
+function applyLibSearch() {
+  const q = document.getElementById('libSearch').value.trim().toLowerCase();
+  const grid = document.getElementById('modelGrid');
+  let visible = 0;
+  for (const card of grid.children) {
+    const hay = card.dataset.search || '';
+    const show = !q || hay.includes(q);
+    card.hidden = !show;
+    if (show) visible++;
+  }
+  const empty = document.getElementById('libEmpty');
+  empty.hidden = visible > 0;
+  empty.textContent = q
+    ? `No models match “${q}”.`
+    : 'Nothing downloaded yet.';
+}
+
 async function loadModels() {
   try {
     const params = new URLSearchParams();
@@ -186,6 +222,7 @@ async function loadModels() {
     empty.hidden = r.models.length > 0;
     grid.innerHTML = r.models.map(modelCard).join('');
     updateLoadMore(r.total);
+    applyLibSearch();  // re-apply an active search to the fresh page
   } catch (e) {
     toast(e.message, 'err');
   }
@@ -206,6 +243,7 @@ async function loadMoreModels() {
     grid.insertAdjacentHTML('beforeend', r.models.map(modelCard).join(''));
     libShown += r.models.length;
     updateLoadMore(r.total);
+    applyLibSearch();
   } catch (e) {
     toast(e.message, 'err');
   } finally {
@@ -329,6 +367,12 @@ async function loadCollections() {
         <span class="interval">
           <input type="number" value="${c.sync_interval_minutes}" min="15" step="15" onchange="setInterval_(${c.collection_id}, this.value)"> min
         </span>
+        <span class="interval">
+          <select onchange="setPlatesMode(${c.collection_id}, this.value)" title="Which plates to download on sync">
+            <option value="default" ${c.plates_mode !== 'all' ? 'selected' : ''}>default plate</option>
+            <option value="all" ${c.plates_mode === 'all' ? 'selected' : ''}>all plates</option>
+          </select>
+        </span>
         <button class="ghost" onclick="syncNow(${c.collection_id})">Sync now</button>
         <button class="ghost" onclick="toggleColl(${c.collection_id}, ${c.enabled ? 'false' : 'true'})">${c.enabled ? 'Pause' : 'Resume'}</button>
         <button class="danger" onclick="removeColl(${c.collection_id})">Remove</button>
@@ -342,6 +386,13 @@ async function setInterval_(cid, minutes) {
   try {
     await api(`/api/collections/${cid}`, { method: 'PATCH', body: { sync_interval_minutes: parseInt(minutes, 10) || 360 } });
     toast('Interval updated', 'ok');
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+async function setPlatesMode(cid, mode) {
+  try {
+    await api(`/api/collections/${cid}`, { method: 'PATCH', body: { plates_mode: mode } });
+    toast(mode === 'all' ? 'Sync will download every plate' : 'Sync will download the default plate', 'ok');
   } catch (e) { toast(e.message, 'err'); }
 }
 

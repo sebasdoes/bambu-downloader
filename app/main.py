@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -16,10 +17,17 @@ from . import routes
 from .config import settings
 from .db import Database
 from .downloader import DownloadManager
-from .makerworld import MakerWorldError, get_client, invalidate_shared_clients, release_client
+from .makerworld import (
+    MakerWorldError,
+    get_client,
+    invalidate_shared_clients,
+    release_client,
+)
 from .scheduler import SyncScheduler
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+)
 logger = logging.getLogger("bambu_downloader")
 
 
@@ -42,20 +50,53 @@ def _probe_writable(path: Path, env_name: str) -> None:
         ) from e
 
 
+def _backup_db(db_path: str, data_dir: str) -> str | None:
+    """Snapshot the SQLite DB into data/backup/ before anything runs.
+
+    Uses sqlite3's online .backup API (safe while other connections exist,
+    unlike copying the file). Keeps just the most recent backup — this is
+    belt-and-suspenders for sync state + the stored token, not a backup
+    strategy; schedule real dumps outside the container for that.
+    """
+
+    if not settings.backup_db_on_boot or not Path(db_path).exists():
+        return None
+    backup_dir = Path(data_dir) / "backup"
+    backup_path = backup_dir / "bambu_downloader.db.bak"
+    try:
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        src = sqlite3.connect(db_path)
+        try:
+            dst = sqlite3.connect(str(backup_path))
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+        finally:
+            src.close()
+        logger.info("Database backed up to %s", backup_path)
+        return str(backup_path)
+    except (sqlite3.Error, OSError) as e:
+        logger.warning("DB backup failed (continuing): %s", e)
+        return None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup/shutdown: build the app's singletons and tear them down cleanly.
 
     Startup probes the bind mounts for writability (fail fast with podman
-    advice), opens the database, starts the collection scheduler and kicks
-    off the metadata backfill in the background. Shutdown cancels the
-    backfill and scheduler so in-flight syncs stop and SQLite checkpoints —
-    uvicorn runs this on SIGTERM/SIGINT (podman stop / compose stop).
+    advice), snapshots the DB to data/backup/, opens the database, starts
+    the collection scheduler and kicks off the metadata backfill in the
+    background. Shutdown cancels the backfill and scheduler so in-flight
+    syncs stop, SQLite checkpoints, and pooled connections close — uvicorn
+    runs this on SIGTERM/SIGINT (podman stop / compose stop).
     """
     Path(settings.download_dir).mkdir(parents=True, exist_ok=True)
     Path(settings.data_dir).mkdir(parents=True, exist_ok=True)
     _probe_writable(Path(settings.download_dir), "BND_DOWNLOAD_DIR")
     _probe_writable(Path(settings.data_dir), "BND_DATA_DIR")
+    _backup_db(settings.db_path, settings.data_dir)
     database = Database(settings.db_path)
     manager = DownloadManager(database)
     scheduler = SyncScheduler(database, manager)
@@ -64,7 +105,11 @@ async def lifespan(app: FastAPI):
     # Fetch missing metadata (cover, creator) for pre-existing models in
     # the background — must not block startup.
     meta_task = asyncio.create_task(manager.backfill_metadata())
-    logger.info("Bambu Downloader ready — downloads: %s, db: %s", settings.download_dir, settings.db_path)
+    logger.info(
+        "Bambu Downloader ready — downloads: %s, db: %s",
+        settings.download_dir,
+        settings.db_path,
+    )
     try:
         yield
     finally:
@@ -114,7 +159,9 @@ def _thumb_etag(blob: bytes, mtime_ns: int | None = None) -> str:
 
 
 @app.get("/thumb")
-async def thumbnail(url: str, w: int = 512, if_none_match: str | None = Header(default=None)):
+async def thumbnail(
+    url: str, w: int = 512, if_none_match: str | None = Header(default=None)
+):
     """Serve a model's cover thumbnail.
 
     Covers are saved as cover.webp next to each model file, so this first
@@ -128,7 +175,11 @@ async def thumbnail(url: str, w: int = 512, if_none_match: str | None = Header(d
 
     if not url.startswith("https://"):
         raise HTTPException(status_code=400, detail="https URL required")
-    if urlparse(url).hostname not in ("makerworld.bblmw.com", "public-cdn.bblmw.com", "makerworld.com"):
+    if urlparse(url).hostname not in (
+        "makerworld.bblmw.com",
+        "public-cdn.bblmw.com",
+        "makerworld.com",
+    ):
         raise HTTPException(status_code=400, detail="host not allowed")
     w = max(64, min(w, 1920))  # clamp to sane sizes
 
@@ -141,7 +192,10 @@ async def thumbnail(url: str, w: int = 512, if_none_match: str | None = Header(d
     def _matches(etag: str, header: str | None) -> bool:
         if not header:
             return False
-        return any(candidate.strip() == etag or candidate.strip() == "*" for candidate in header.split(","))
+        return any(
+            candidate.strip() == etag or candidate.strip() == "*"
+            for candidate in header.split(",")
+        )
 
     model_file = routes.db.find_model_path_by_cover(url)
     local = (Path(model_file).parent / "cover.webp") if model_file else None
@@ -160,7 +214,7 @@ async def thumbnail(url: str, w: int = 512, if_none_match: str | None = Header(d
     try:
         blob = await client.fetch_thumbnail(url, width=w)
     except MakerWorldError:
-        raise HTTPException(status_code=502, detail="upstream fetch failed")
+        raise HTTPException(status_code=502, detail="upstream fetch failed") from None
     finally:
         await release_client(client)
     # Persist next to the model so future requests (and the file manager)
@@ -181,7 +235,9 @@ async def thumbnail(url: str, w: int = 512, if_none_match: str | None = Header(d
 @app.get("/manifest.webmanifest")
 async def manifest():
     """Serve the PWA manifest (installability + Android share target)."""
-    return FileResponse(_static_dir / "manifest.webmanifest", media_type="application/manifest+json")
+    return FileResponse(
+        _static_dir / "manifest.webmanifest", media_type="application/manifest+json"
+    )
 
 
 @app.get("/sw.js")
@@ -194,16 +250,40 @@ async def service_worker():
     return FileResponse(
         _static_dir / "sw.js",
         media_type="application/javascript",
-        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "X-Content-Type-Options": "nosniff",
+        },
     )
+
+
+# Content-Security-Policy for the app shell. The UI is self-contained: no
+# external scripts/styles/fonts, images come from our own /thumb proxy (and
+# blob: for the share-target preview). 'unsafe-inline' styles stay for the
+# inline <style> block in index.html; scripts are external files only, so
+# script-src stays strict.
+_CSP = (
+    "default-src 'self'; "
+    "script-src 'self'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: blob:; "
+    "connect-src 'self'; "
+    "frame-ancestors 'self'; "
+    "base-uri 'self'"
+)
 
 
 @app.get("/")
 async def index():
-    """Serve the app shell with no-store headers so UI updates land promptly."""
+    """Serve the app shell: no-store (UI updates land promptly) + CSP."""
     return FileResponse(
         _static_dir / "index.html",
-        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Content-Security-Policy": _CSP,
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
+        },
     )
 
 

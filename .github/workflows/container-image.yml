@@ -24,9 +24,9 @@ permissions:
 
 jobs:
   # Same-file gate: `needs:` can only reference jobs in THIS workflow, so
-  # pytest runs here (cheap: pip + a few seconds) before any Docker build.
-  # The standalone tests.yml reports as its own check on PRs/pushes — the
-  # small duplicate run is the price of a real build gate.
+  # pytest + ruff run here before any Docker build (lint ~5s, tests ~6s).
+  # The standalone tests.yml reports the same checks as its own check on
+  # PRs/pushes — the small duplicate run is the price of a real gate.
   tests:
     runs-on: ubuntu-latest
     steps:
@@ -44,12 +44,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-dev.txt
 
+      - name: Ruff lint + format check
+        run: |
+          ruff check app/ tests/
+          ruff format app/ tests/ --check
+
       - name: Run pytest
         run: python -m pytest tests/ -v --tb=short
 
   build-and-push:
     runs-on: ubuntu-latest
-    needs: tests   # must pass pytest first
+    needs: tests   # must pass pytest + ruff first
     steps:
       - name: Checkout
         uses: actions/checkout@v4
